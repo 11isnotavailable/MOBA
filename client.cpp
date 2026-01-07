@@ -8,7 +8,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
-#include <chrono> // [新增] 用于精确计时
+#include <chrono> 
 #include "protocol.h"
 #include "map.h" 
 
@@ -20,15 +20,14 @@ bool has_my_data = false;
 int my_player_id = -1;
 int cam_x=0, cam_y=0, current_view_w=0, current_view_h=0;
 std::vector<std::string> combat_logs;
+int current_game_time = 0; // [新增] 游戏时间
 
 // 鼠标/自动移动相关变量
 bool is_auto_moving = false;
 int target_dest_x = 0;
 int target_dest_y = 0;
-// 防卡死机制
 int last_pos_x = -1, last_pos_y = -1;
 int stuck_frames = 0;
-// [新增] 发包限流
 long long last_auto_move_time = 0;
 
 char debug_msg[128] = "Ready."; 
@@ -108,7 +107,6 @@ void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) 
         for (int dx = -r; dx <= r; dx++) {
             int wx = world_x + dx; int wy = world_y + dy;
             
-            // 圆形判定
             if (dx*dx + dy*dy <= range * range) {
                 int sx = wx - cam_x; int sy = wy - cam_y;
                 if (sx < 0 || sx >= current_view_w || sy < 0 || sy >= current_view_h) continue;
@@ -117,18 +115,15 @@ void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) 
                      int tile = game_map[wy][wx];
                      int final_color = base_color_idx; 
                      
-                     // 如果是在空地上
                      if (tile == TILE_EMPTY) {
                         attron(COLOR_PAIR(final_color)); 
                         mvprintw(sy + ui_offset, sx * 2, "·"); 
                         attroff(COLOR_PAIR(final_color));
                      }
-                     // 如果是在河道上
                      else if (tile == TILE_RIVER) {
                         if (base_color_idx == 30) final_color = 33;
                         else if (base_color_idx == 31) final_color = 34; 
                         else if (base_color_idx == 32) final_color = 35;
-                        
                         attron(COLOR_PAIR(final_color)); 
                         mvprintw(sy + ui_offset, sx * 2, "·"); 
                         attroff(COLOR_PAIR(final_color));
@@ -139,7 +134,6 @@ void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) 
     }
 }
 
-// 英雄绘制函数
 void draw_hero_visual(int world_x, int world_y, int hero_id, int color_id, bool is_me, int effect) {
     int sx = world_x - cam_x; int sy = world_y - cam_y;
     int ui_offset = UI_TOP_HEIGHT;
@@ -163,79 +157,56 @@ void draw_hero_visual(int world_x, int world_y, int hero_id, int color_id, bool 
 
 // === 地图渲染 ===
 void draw_map() {
-    // 渲染前清理屏幕，避免残影
     erase(); 
-    
     int ui_offset = UI_TOP_HEIGHT;
     for (int dy = 0; dy < current_view_h; dy++) {
         for (int dx = 0; dx < current_view_w; dx++) {
             int wx = cam_x + dx; int wy = cam_y + dy;
             if (wx >= MAP_SIZE || wy >= MAP_SIZE) continue;
-            
             int tile = game_map[wy][wx];
-            
-            if (tile == TILE_WALL) {
-                attron(COLOR_PAIR(4)); mvprintw(dy + ui_offset, dx * 2, "♣ "); attroff(COLOR_PAIR(4));
-            }
-            else if (tile == TILE_RIVER) {
-                attron(COLOR_PAIR(5)); mvprintw(dy + ui_offset, dx * 2, "~~"); attroff(COLOR_PAIR(5));
-            }
+            if (tile == TILE_WALL) { attron(COLOR_PAIR(4)); mvprintw(dy + ui_offset, dx * 2, "♣ "); attroff(COLOR_PAIR(4)); }
+            else if (tile == TILE_RIVER) { attron(COLOR_PAIR(5)); mvprintw(dy + ui_offset, dx * 2, "~~"); attroff(COLOR_PAIR(5)); }
             else if (tile == TILE_BASE) {
-                // [新增] 绘制水晶攻击范围
-                // 蓝方基地在左下 (wx < 75)，红方基地在右上 (wx >= 75)
                 int range_color = (wx < 75) ? 31 : 32;
-                
-                // 绘制范围圈 (半径8)
                 draw_range_circle(wx, wy, 8, range_color);
-
-                // 绘制水晶本体
-                attron(COLOR_PAIR(7) | A_BOLD); 
-                mvprintw(dy + ui_offset, dx * 2, "★ "); 
-                attroff(COLOR_PAIR(7) | A_BOLD);
+                attron(COLOR_PAIR(7) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "★ "); attroff(COLOR_PAIR(7) | A_BOLD);
             }
-            else if (tile == TILE_TOWER_WALL) {
-                attron(COLOR_PAIR(8) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "##"); attroff(COLOR_PAIR(8) | A_BOLD);
-            }
+            else if (tile == TILE_TOWER_WALL) { attron(COLOR_PAIR(8) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "##"); attroff(COLOR_PAIR(8) | A_BOLD); }
             else if (tile >= TILE_TOWER_B_1 && tile <= TILE_TOWER_R_3) {
                 bool is_blue = (tile >= TILE_TOWER_B_1 && tile <= TILE_TOWER_B_3);
-                int color = is_blue ? 4 : 2; 
-                int range_color = is_blue ? 31 : 32;
+                int color = is_blue ? 4 : 2; int range_color = is_blue ? 31 : 32;
                 draw_range_circle(wx, wy, 6, range_color);
-                
                 const char* label = "?";
                 if (tile == TILE_TOWER_B_1 || tile == TILE_TOWER_R_1) label = "V ";
                 if (tile == TILE_TOWER_B_2 || tile == TILE_TOWER_R_2) label = "M ";
                 if (tile == TILE_TOWER_B_3 || tile == TILE_TOWER_R_3) label = "H ";
-                
-                attron(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
-                mvprintw(dy + ui_offset, dx * 2, "%s", label); 
-                attroff(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
+                attron(COLOR_PAIR(color) | A_BOLD | A_REVERSE); mvprintw(dy + ui_offset, dx * 2, "%s", label); attroff(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
             }
-            else {
-                attron(COLOR_PAIR(16));
-                if((wx+wy) % 9 == 0) mvprintw(dy + ui_offset, dx * 2, "·");
-                attroff(COLOR_PAIR(16));
-            }
+            else { attron(COLOR_PAIR(16)); if((wx+wy) % 9 == 0) mvprintw(dy + ui_offset, dx * 2, "·"); attroff(COLOR_PAIR(16)); }
         }
     }
     
     draw_destination_marker();
-
-    if(has_my_data) {
-        draw_range_circle(my_status.x, my_status.y, my_status.attack_range, 30);
-    }
+    if(has_my_data) { draw_range_circle(my_status.x, my_status.y, my_status.attack_range, 30); }
     for(const auto& p : world_state) {
         if (p.attack_target_id > 0) {
-            for(const auto& t : world_state) {
-                if (t.id == p.attack_target_id) {
-                    draw_laser_line(p.x, p.y, t.x, t.y); break;
-                }
-            }
+            int tx = 0, ty = 0;
+            for(const auto& t : world_state) { if (t.id == p.attack_target_id) { tx = t.x; ty = t.y; break; } }
+            if (tx != 0) draw_laser_line(p.x, p.y, tx, ty);
         }
     }
     for(const auto& p : world_state) {
-        bool is_me = (p.id == my_player_id);
-        draw_hero_visual(p.x, p.y, p.hero_id, p.color, is_me, p.effect);
+        if (p.id >= 10000) {
+            int color = (p.color == 1) ? 31 : 32; 
+            int sx = p.x - cam_x; int sy = p.y - cam_y;
+            if (sx >= 0 && sx < current_view_w && sy >= 0 && sy < current_view_h) {
+                char symbol = (p.input == MINION_TYPE_MELEE) ? 'o' : 'i'; // 注意这里用 input 字段
+                attron(COLOR_PAIR(color) | A_BOLD); mvprintw(sy + ui_offset, sx * 2, "%c ", symbol); attroff(COLOR_PAIR(color) | A_BOLD);
+            }
+        } else {
+            bool is_me = (p.id == my_player_id);
+            draw_hero_visual(p.x, p.y, p.input, p.color, is_me, p.effect);
+        }
     }
 }
 
@@ -253,25 +224,27 @@ void draw_bar(int y, int x, int width, int cur, int max, int color_pair, const c
     mvprintw(y, x + width + 2, "%d/%d", cur, max);
 }
 void draw_skill_box(int y, int x, char key, const char* name, int color) {
-    attron(COLOR_PAIR(color));
-    mvprintw(y, x, "┌───┐"); mvprintw(y+1, x, "│ %c │", key); mvprintw(y+2, x, "└───┘");
-    attroff(COLOR_PAIR(color)); mvprintw(y+3, x, " %s", name);
+    attron(COLOR_PAIR(color)); mvprintw(y, x, "┌───┐"); mvprintw(y+1, x, "│ %c │", key); mvprintw(y+2, x, "└───┘"); attroff(COLOR_PAIR(color)); mvprintw(y+3, x, " %s", name);
 }
 void draw_ui() {
     int H = LINES; int W = COLS; int bottom_y = H - UI_BOTTOM_HEIGHT;
     attron(COLOR_PAIR(10)); mvhline(0, 0, ' ', W); 
     
-    // [DEBUG] 显示调试信息在右上角
-    mvprintw(0, W - 40, "DEBUG: %s", debug_msg);
-    
+    // [新增] 显示游戏时间
+    int m = current_game_time / 60;
+    int s = current_game_time % 60;
+    attron(COLOR_PAIR(10) | A_BOLD);
+    mvprintw(0, 2, "Time: %02d:%02d", m, s);
+    attroff(COLOR_PAIR(10) | A_BOLD);
+
     mvprintw(0, W - 15, "[Q] QUIT"); attroff(COLOR_PAIR(10));
     attron(COLOR_PAIR(11)); mvhline(bottom_y - 1, 0, ACS_HLINE, W); attroff(COLOR_PAIR(11));
     if (!has_my_data) return;
     attron(COLOR_PAIR(11) | A_BOLD); mvprintw(bottom_y, 2, "HERO INFO"); attroff(COLOR_PAIR(11) | A_BOLD);
     const char* hname = "Unknown";
-    if(my_status.hero_id == HERO_WARRIOR) hname = "Warrior (武)";
-    if(my_status.hero_id == HERO_MAGE)    hname = "Mage    (法)";
-    if(my_status.hero_id == HERO_TANK)    hname = "Tank    (坦)";
+    if(my_status.input == HERO_WARRIOR) hname = "Warrior (武)";
+    if(my_status.input == HERO_MAGE)    hname = "Mage    (法)";
+    if(my_status.input == HERO_TANK)    hname = "Tank    (坦)";
     mvprintw(bottom_y + 1, 2, "%s", hname); mvprintw(bottom_y + 2, 2, "Range: %d", my_status.attack_range);
     int cx = W / 2 - 20;
     draw_bar(bottom_y, cx, 20, my_status.hp, my_status.max_hp, 12, "HP:");
@@ -364,16 +337,13 @@ int main() {
         bool trying_to_move = false;
         long long current_time = get_current_ms();
 
-        // ==========================================
-        // 1. 输入处理 (INPUT LOOP)
-        // ==========================================
+        // 1. 输入处理
         int ch;
         MEVENT event;
         while ((ch = getch()) != ERR) {
             if (ch == KEY_RESIZE) { erase(); refresh(); continue; } 
             if (ch == 'q') goto end_game;
 
-            // 鼠标处理
             if (ch == KEY_MOUSE) {
                 if (getmouse(&event) == OK) {
                     if (event.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED)) {
@@ -391,18 +361,12 @@ int main() {
                 }
             }
 
-            // WASD 强制打断
             if (ch == 'w' || ch == 's' || ch == 'a' || ch == 'd') {
-                if (is_auto_moving) {
-                    is_auto_moving = false; 
-                    add_log("[CMD] Manual Override!");
-                }
-                
+                if (is_auto_moving) is_auto_moving = false;
                 if (ch == 'w') { dy = -1; trying_to_move = true; }
                 if (ch == 's') { dy = 1;  trying_to_move = true; }
                 if (ch == 'a') { dx = -1; trying_to_move = true; }
                 if (ch == 'd') { dx = 1;  trying_to_move = true; }
-                sprintf(debug_msg, "Manual Input");
             }
 
             if (ch == 'j' || ch == 'J') {
@@ -415,75 +379,49 @@ int main() {
             }
         }
 
-        // ==========================================
-        // 2. 移动逻辑与寻路算法 (LOGIC LOOP)
-        // ==========================================
+        // 2. 移动逻辑
         if (trying_to_move) {
-            // 键盘操作：零延迟，立即发送
             GamePacket mv = {TYPE_MOVE, 0, dx, dy, 0, 0, 0, 0, 0, 0, 0, 0}; 
             write(sock, &mv, sizeof(mv));
         } 
         else if (is_auto_moving && has_my_data) {
-            // [发包限流] 只有当距离上次发包超过 60ms 时才发送
             if (current_time - last_auto_move_time > 60) {
                 last_auto_move_time = current_time;
-
-                // [卡死检测]
                 if (my_status.x == last_pos_x && my_status.y == last_pos_y) {
                     stuck_frames++;
-                    if (stuck_frames > 5) { // 连续5次判定都没动，说明卡死了
-                        is_auto_moving = false;
-                        add_log("Blocked. Stopped.");
-                        sprintf(debug_msg, "Blocked");
-                        stuck_frames = 0;
-                        continue; 
-                    }
-                } else {
-                    stuck_frames = 0;
-                    last_pos_x = my_status.x;
-                    last_pos_y = my_status.y;
-                }
+                    if (stuck_frames > 5) { is_auto_moving = false; stuck_frames = 0; continue; }
+                } else { stuck_frames = 0; last_pos_x = my_status.x; last_pos_y = my_status.y; }
 
                 int diff_x = target_dest_x - my_status.x;
                 int diff_y = target_dest_y - my_status.y;
                 
-                if (abs(diff_x) <= 1 && abs(diff_y) <= 1) {
-                    is_auto_moving = false;
-                    sprintf(debug_msg, "Arrived");
-                } else {
+                if (abs(diff_x) <= 1 && abs(diff_y) <= 1) is_auto_moving = false;
+                else {
                     int move_dx = 0, move_dy = 0;
                     bool move_x_first = abs(diff_x) > abs(diff_y);
-
                     if (move_x_first) {
                         if (diff_x > 0) move_dx = 1; else if (diff_x < 0) move_dx = -1;
                         if (!is_walkable(my_status.x + move_dx, my_status.y)) {
-                             move_dx = 0;
-                             if (diff_y > 0) move_dy = 1; else if (diff_y < 0) move_dy = -1;
+                             move_dx = 0; if (diff_y > 0) move_dy = 1; else if (diff_y < 0) move_dy = -1;
                         }
                     } else {
                         if (diff_y > 0) move_dy = 1; else if (diff_y < 0) move_dy = -1;
                         if (!is_walkable(my_status.x, my_status.y + move_dy)) {
-                            move_dy = 0;
-                            if (diff_x > 0) move_dx = 1; else if (diff_x < 0) move_dx = -1;
+                            move_dy = 0; if (diff_x > 0) move_dx = 1; else if (diff_x < 0) move_dx = -1;
                         }
                     }
-
                     if (move_dx == 0 && move_dy == 0) {
                          if (diff_x > 0) move_dx = 1; else if (diff_x < 0) move_dx = -1;
                          if (diff_y > 0) move_dy = 1; else if (diff_y < 0) move_dy = -1;
                     }
-
                     GamePacket mv = {TYPE_MOVE, 0, move_dx, move_dy, 0, 0, 0, 0, 0, 0, 0, 0}; 
                     write(sock, &mv, sizeof(mv));
                 }
             }
         }
 
-        // ==========================================
-        // 3. 网络接收与渲染 (RENDER LOOP)
-        // ==========================================
+        // 3. 网络接收与渲染
         bool need_render = false;
-        
         while(true) {
             GamePacket recv_pkt;
             int n = recv(sock, &recv_pkt, sizeof(recv_pkt), MSG_DONTWAIT);
@@ -492,14 +430,13 @@ int main() {
             if (recv_pkt.type == TYPE_FRAME) { 
                 world_state = buf; buf.clear();
                 has_my_data = false;
+                // [新增] 读取帧时间
+                current_game_time = recv_pkt.extra;
                 for(const auto& p : world_state) {
                     if (p.id == my_player_id) {
                         my_status = p; has_my_data = true;
                         update_camera(my_status.x, my_status.y);
-                        if (last_hp != -1) {
-                             if (my_status.hp < last_hp) { 
-                             }
-                        }
+                        if (last_hp != -1) { if (my_status.hp < last_hp) {} }
                         last_hp = my_status.hp; break;
                     }
                 }
@@ -510,12 +447,8 @@ int main() {
         }
         
         if (need_render) {
-            draw_map(); 
-            draw_ui();
-            refresh();
+            draw_map(); draw_ui(); refresh();
         }
-        
-        // 主循环保持高帧率，以响应键盘
         usleep(10000); 
     }
 
