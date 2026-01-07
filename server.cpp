@@ -32,7 +32,6 @@ int game_map[MAP_SIZE][MAP_SIZE];
 long long game_start_time = 0;
 int wave_count = 0; 
 
-// 物理判定
 bool is_valid_move(int x, int y) {
     if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return false;
     int t = game_map[y][x];
@@ -82,31 +81,40 @@ struct Minion {
     long long visual_end_time; 
 };
 
+// [新增] 野怪结构体
+struct JungleMonster {
+    int id, type; 
+    int x, y; // 坐标
+    int hp, max_hp, dmg, range;
+    int target_id; // 当前仇恨目标
+    long long last_hit_by_time; // 上次被攻击的时间（用于脱战判断）
+    long long last_attack_time; // 上次攻击时间
+    long long last_regen_time;  // 上次回复时间
+    long long visual_end_time;  // 攻击特效
+};
+
 // 容器
-std::map<int, Player> players; // Key是FD，不是PlayerID！
+std::map<int, Player> players; 
 std::map<int, Minion> minions;
 std::map<int, Tower> towers; 
+std::map<int, JungleMonster> jungle_mobs; // [新增]
 
 int global_id_counter = 1;
 int tower_id_counter = TOWER_ID_START;
 int minion_id_counter = MINION_ID_START;
+int jungle_id_counter = JUNGLE_ID_START; // [新增]
 int last_spawn_minute = -1; 
 
-// [修复] 通过ID查找玩家的辅助函数
 Player* get_player_by_id(int id) {
     for (auto& pair : players) {
-        if (pair.second.id == id && pair.second.is_playing) {
-            return &pair.second;
-        }
+        if (pair.second.id == id && pair.second.is_playing) return &pair.second;
     }
     return nullptr;
 }
 
-// 物理判定补充
 bool is_blocked_by_tower(int x, int y) {
     if (!is_valid_move(x, y)) return true;
     int t = game_map[y][x];
-    // 阻挡逻辑：如果该位置有塔或者有水晶，且血量大于0，则阻挡
     if ((t >= 11 && t <= 23) || t == TILE_BASE) {
         for (auto& pair : towers) {
             if (pair.second.x == x && pair.second.y == y) return (pair.second.hp > 0);
@@ -120,60 +128,163 @@ int setNonBlocking(int sockfd) {
     return fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// [修改] 初始化塔（包含水晶）
 void init_towers() {
     for(int y=0; y<MAP_SIZE; y++) {
         for(int x=0; x<MAP_SIZE; x++) {
             int t = game_map[y][x];
-            
-            // [新增] 判断条件加入 TILE_BASE (2)
-            // 使得水晶被视为一个 Tower 实体，拥有血量和攻击AI
             if ((t >= 11 && t <= 23) || t == TILE_BASE) {
                 Tower tower; 
-                tower.id = tower_id_counter++; 
-                tower.x = x; 
-                tower.y = y;
-                tower.target_id = 0; 
-                tower.consecutive_hits = 0; 
-                tower.last_attack_time = 0; 
-                tower.visual_end_time = 0;
-
+                tower.id = tower_id_counter++; tower.x = x; tower.y = y;
+                tower.target_id = 0; tower.consecutive_hits = 0; 
+                tower.last_attack_time = 0; tower.visual_end_time = 0;
                 if (t == TILE_BASE) {
-                    // 水晶逻辑
-                    // 假设左侧(x<75)是蓝方基地(Team 1)，右侧是红方(Team 2)
-                    tower.team = (x < 75) ? 1 : 2;
-                    tower.max_hp = 10000; // [设置] 水晶血量为 1w
-                } 
-                else {
-                    // 原有防御塔逻辑
+                    tower.team = (x < 75) ? 1 : 2; tower.max_hp = 10000; 
+                } else {
                     if (t >= 11 && t <= 13) {
                         tower.team = 1;
-                        if (t==11) tower.max_hp = TOWER_HP_TIER_1; 
-                        else if (t==12) tower.max_hp = TOWER_HP_TIER_2; 
-                        else tower.max_hp = TOWER_HP_TIER_3;
+                        if (t==11) tower.max_hp = TOWER_HP_TIER_1; else if (t==12) tower.max_hp = TOWER_HP_TIER_2; else tower.max_hp = TOWER_HP_TIER_3;
                     } else {
                         tower.team = 2;
-                        if (t==21) tower.max_hp = TOWER_HP_TIER_1; 
-                        else if (t==22) tower.max_hp = TOWER_HP_TIER_2; 
-                        else tower.max_hp = TOWER_HP_TIER_3;
+                        if (t==21) tower.max_hp = TOWER_HP_TIER_1; else if (t==22) tower.max_hp = TOWER_HP_TIER_2; else tower.max_hp = TOWER_HP_TIER_3;
                     }
                 }
-                
-                tower.hp = tower.max_hp; 
-                towers[tower.id] = tower;
+                tower.hp = tower.max_hp; towers[tower.id] = tower;
             }
         }
     }
 }
 
-// === 出兵逻辑 ===
+// [新增] 初始化野区
+void init_jungle() {
+    // 根据 map.h 的数据，野区由 create_penetrating_cross 生成
+    // 四个区域的 Top-Left 坐标和 Size(26)
+    // 中心点 = TL + 13
+    struct Zone { int x, y, size; int buff_type; };
+    std::vector<Zone> zones = {
+        {56, 96, 26, MONSTER_TYPE_BLUE}, // South (Blue Buff for Bottom side?) - 暂定
+        {68, 28, 26, MONSTER_TYPE_RED},  // North
+        {28, 62, 26, MONSTER_TYPE_RED},  // West (Blue side Jungle)
+        {96, 62, 26, MONSTER_TYPE_BLUE}  // East (Red side Jungle)
+    };
+
+    for (const auto& z : zones) {
+        // 1. 生成 Buff 怪 (位于十字中心)
+        int cx = z.x + z.size / 2;
+        int cy = z.y + z.size / 2;
+        
+        JungleMonster buff;
+        buff.id = jungle_id_counter++;
+        buff.type = z.buff_type; 
+        buff.x = cx; buff.y = cy;
+        buff.hp = MONSTER_BUFF_HP; buff.max_hp = MONSTER_BUFF_HP;
+        buff.dmg = MONSTER_BUFF_DMG; buff.range = MONSTER_BUFF_RANGE;
+        buff.target_id = 0; buff.last_hit_by_time = 0;
+        buff.last_attack_time = 0; buff.last_regen_time = 0;
+        jungle_mobs[buff.id] = buff;
+
+        // 2. 生成普通野怪 (随机分布，避开中心)
+        int std_count = 0;
+        int attempts = 0;
+        while(std_count < 3 && attempts < 50) { // 每个区域生成3个
+            attempts++;
+            int rx = z.x + 2 + rand() % (z.size - 4);
+            int ry = z.y + 2 + rand() % (z.size - 4);
+
+            // 检查位置是否为空
+            if (game_map[ry][rx] != TILE_EMPTY) continue;
+            // 检查是否离中心太近 (Buff的位置)
+            if (dist_sq(rx, ry, cx, cy) < 25) continue;
+            // 检查是否重叠其他野怪
+            bool overlap = false;
+            for(const auto& m : jungle_mobs) {
+                if (dist_sq(rx, ry, m.second.x, m.second.y) < 9) { overlap = true; break; }
+            }
+            if(overlap) continue;
+
+            JungleMonster mob;
+            mob.id = jungle_id_counter++;
+            mob.type = MONSTER_TYPE_STD;
+            mob.x = rx; mob.y = ry;
+            mob.hp = MONSTER_STD_HP; mob.max_hp = MONSTER_STD_HP;
+            mob.dmg = MONSTER_STD_DMG; mob.range = MONSTER_STD_RANGE;
+            mob.target_id = 0; mob.last_hit_by_time = 0;
+            mob.last_attack_time = 0; mob.last_regen_time = 0;
+            jungle_mobs[mob.id] = mob;
+            std_count++;
+        }
+    }
+}
+
+// [新增] 野怪逻辑更新
+void update_jungle() {
+    long long now = get_current_ms();
+    std::vector<int> dead_ids;
+
+    for (auto& pair : jungle_mobs) {
+        JungleMonster& m = pair.second;
+        if (m.hp <= 0) { dead_ids.push_back(m.id); continue; }
+
+        // 1. 脱战判定
+        // 如果当前有仇恨目标，但距离上次挨打超过4秒，清除仇恨
+        if (m.target_id != 0) {
+            if (now - m.last_hit_by_time > MONSTER_AGGRO_TIMEOUT) {
+                m.target_id = 0; // 丢失仇恨
+                // 可以在这里加个回满血或者归位逻辑，目前先原地呆着
+            }
+        }
+
+        // 2. 回血逻辑
+        // 如果没有仇恨目标，且不满血，每秒恢复 3k
+        if (m.target_id == 0 && m.hp < m.max_hp) {
+            if (now - m.last_regen_time >= 1000) {
+                m.hp += MONSTER_REGEN_TICK;
+                if (m.hp > m.max_hp) m.hp = m.max_hp;
+                m.last_regen_time = now;
+            }
+        }
+
+        // 3. 攻击逻辑 (仅当有仇恨目标时)
+        if (m.target_id != 0) {
+            // 校验目标有效性
+            int tx = 0, ty = 0;
+            bool valid = false;
+            Player* p = get_player_by_id(m.target_id);
+            if (p) { tx = p->x; ty = p->y; valid = true; }
+            else if (minions.count(m.target_id)) { 
+                // 暂时不让野怪打小兵，除非小兵先打野怪（这里简化，野怪只反击）
+                // 实际上小兵代码没写打野怪逻辑，所以野怪target基本只有玩家
+            }
+
+            if (!valid) {
+                m.target_id = 0; // 目标消失，脱战
+            } else {
+                int d = dist_sq(m.x, m.y, tx, ty);
+                if (d <= m.range * m.range) {
+                    if (now - m.last_attack_time >= MONSTER_ATK_COOLDOWN) {
+                        m.last_attack_time = now;
+                        m.visual_end_time = now + 200;
+                        if (p) {
+                            p->hp -= m.dmg;
+                            p->current_effect = EFFECT_HIT;
+                        }
+                    }
+                } else {
+                    // 距离过远，也脱战
+                    if (d > (m.range + 3) * (m.range + 3)) m.target_id = 0; 
+                }
+            }
+        }
+    }
+    
+    // 清理尸体
+    for (int id : dead_ids) jungle_mobs.erase(id);
+}
+
 void spawn_wave() {
     wave_count++; 
     std::cout << "[System] Wave " << wave_count << " Spawned." << std::endl;
-    
     int melee_hp = MELEE_BASE_HP + 200 * wave_count;
     int melee_dmg = MELEE_BASE_DMG + 150 * wave_count; 
-
     int ranged_hp = RANGED_BASE_HP + 150 * wave_count;
     int ranged_dmg = RANGED_BASE_DMG + 200 * wave_count; 
 
@@ -185,7 +296,7 @@ void spawn_wave() {
             m.dmg = (m.type == 1) ? melee_dmg : ranged_dmg;
             m.range = (m.type == 1) ? MELEE_RANGE : RANGED_RANGE;
             m.x = 22 + rand()%2; m.y = 128 + rand()%2; 
-            m.wp_idx = 0; m.state = Minion::MARCHING; m.last_attack_time = 0; m.visual_end_time = 0;
+            m.wp_idx = 0; m.state = Minion::MARCHING; 
             minions[m.id] = m;
         }
         for(int i=0; i<3; i++) {
@@ -196,13 +307,12 @@ void spawn_wave() {
             m.range = (m.type == 1) ? MELEE_RANGE : RANGED_RANGE;
             m.x = 128 + rand()%2; m.y = 22 + rand()%2; 
             const std::vector<Point>* path = (lane == 0) ? &PATH_TOP : ((lane == 1) ? &PATH_MID : &PATH_BOT);
-            m.wp_idx = path->size() - 1; m.state = Minion::MARCHING; m.last_attack_time = 0; m.visual_end_time = 0;
+            m.wp_idx = path->size() - 1; m.state = Minion::MARCHING; 
             minions[m.id] = m;
         }
     }
 }
 
-// === 防御塔逻辑 (修复版) ===
 void update_towers() {
     long long now = get_current_ms();
     int tower_range_sq = TOWER_ATK_RANGE * TOWER_ATK_RANGE;
@@ -211,39 +321,28 @@ void update_towers() {
         Tower& t = pair.second;
         if (t.hp <= 0) continue;
 
-        // 1. 寻找目标
         int best_target = 0;
         int min_dist = 99999;
 
-        // A. 仇恨优先
         for (auto& p : players) {
             Player& enemy = p.second;
             if (!enemy.is_playing || enemy.color == t.team) continue;
             int d = dist_sq(t.x, t.y, enemy.x, enemy.y);
             if (d > tower_range_sq) continue;
-
-            if (now - enemy.last_aggressive_time < 2000) {
-                best_target = enemy.id;
-                break; 
-            }
+            if (now - enemy.last_aggressive_time < 2000) { best_target = enemy.id; break; }
         }
 
-        // B. 维持当前目标
         if (best_target == 0 && t.target_id != 0) {
-            bool valid = false;
-            int tx=0, ty=0;
+            bool valid = false; int tx=0, ty=0;
             Player* p = get_player_by_id(t.target_id);
             if (p) { tx = p->x; ty = p->y; valid = true; }
             else if (minions.count(t.target_id)) {
                 Minion& m = minions[t.target_id];
                 if (m.hp > 0) { tx = (int)m.x; ty = (int)m.y; valid = true; }
             }
-            if (valid && dist_sq(t.x, t.y, tx, ty) <= tower_range_sq) {
-                best_target = t.target_id;
-            }
+            if (valid && dist_sq(t.x, t.y, tx, ty) <= tower_range_sq) best_target = t.target_id;
         }
 
-        // C. 最近敌人
         if (best_target == 0) {
             for (auto& m : minions) {
                 if (m.second.team == t.team) continue;
@@ -259,56 +358,43 @@ void update_towers() {
             }
         }
 
-        if (best_target != t.target_id) {
-            t.consecutive_hits = 0; 
-            t.target_id = best_target;
-        }
+        if (best_target != t.target_id) { t.consecutive_hits = 0; t.target_id = best_target; }
 
         if (t.target_id != 0) {
             if (now - t.last_attack_time >= TOWER_ATK_COOLDOWN) {
                 t.last_attack_time = now;
                 t.visual_end_time = now + 200; 
-
                 int damage = 0;
                 Player* p = get_player_by_id(t.target_id);
-                if (p) { // 打人
+                if (p) { 
                     damage = TOWER_BASE_DMG_HERO * (int)pow(2, t.consecutive_hits);
                     t.consecutive_hits++; 
-                    
                     p->hp -= damage;
                     p->current_effect = EFFECT_HIT;
-                    std::cout << "Tower Hit Player " << p->id << " HP:" << p->hp << std::endl;
-
                     if(p->hp <= 0) {
                         p->hp = p->max_hp;
                         p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
                         t.target_id = 0; t.consecutive_hits = 0;
                     }
                 } 
-                else if (minions.count(t.target_id)) { // 打兵
+                else if (minions.count(t.target_id)) { 
                     damage = TOWER_BASE_DMG_MINION + 100 * wave_count;
                     minions[t.target_id].hp -= damage;
                 }
             }
-        } else {
-            t.consecutive_hits = 0;
-        }
+        } else { t.consecutive_hits = 0; }
     }
 }
 
-// === 小兵 AI (修复版) ===
 void update_minions() {
     std::vector<int> dead_ids;
     long long now = get_current_ms();
-
     for (auto& pair : minions) {
         Minion& m = pair.second;
         if (m.hp <= 0) { dead_ids.push_back(m.id); continue; }
-
         if (m.state == Minion::MARCHING) {
             int min_d = 9999, found = 0;
             int vision_sq = MINION_VISION_RANGE * MINION_VISION_RANGE;
-
             for (auto& p : players) {
                 if (!p.second.is_playing || p.second.color == m.team) continue;
                 int d = dist_sq((int)m.x, (int)m.y, p.second.x, p.second.y);
@@ -325,67 +411,49 @@ void update_minions() {
                 for (auto& t : towers) {
                     if (t.second.team == m.team || t.second.hp <= 0) continue;
                     int d = dist_sq((int)m.x, (int)m.y, t.second.x, t.second.y);
-                    // 视野范围稍微大一点，方便锁定塔
-                    if (d <= (MINION_VISION_RANGE+2)*(MINION_VISION_RANGE+2) && d < min_d) { 
-                        min_d = d; found = t.second.id; 
-                    }
+                    if (d <= (MINION_VISION_RANGE+2)*(MINION_VISION_RANGE+2) && d < min_d) { min_d = d; found = t.second.id; }
                 }
             }
-
-            if (found != 0) {
-                m.state = Minion::CHASING; m.target_id = found;
-                m.anchor_x = m.x; m.anchor_y = m.y;
-            } else {
+            if (found != 0) { m.state = Minion::CHASING; m.target_id = found; m.anchor_x = m.x; m.anchor_y = m.y; }
+            else {
                 const std::vector<Point>* path = (m.lane == 0) ? &PATH_TOP : ((m.lane == 1) ? &PATH_MID : &PATH_BOT);
                 Point target = (*path)[m.wp_idx];
-                float dx = target.x - m.x, dy = target.y - m.y;
-                float dist = sqrt(dx*dx + dy*dy);
+                float dx = target.x - m.x, dy = target.y - m.y; float dist = sqrt(dx*dx + dy*dy);
                 if (dist < 2.0f) {
                     if (m.team == 1 && m.wp_idx < path->size() - 1) m.wp_idx++;
                     else if (m.team == 2 && m.wp_idx > 0) m.wp_idx--;
-                } else {
-                    m.x += (dx/dist) * MINION_MOVE_SPEED; m.y += (dy/dist) * MINION_MOVE_SPEED;
-                }
+                } else { m.x += (dx/dist) * MINION_MOVE_SPEED; m.y += (dy/dist) * MINION_MOVE_SPEED; }
             }
         }
         else if (m.state == Minion::CHASING) {
             int dist_anchor = dist_sq((int)m.x, (int)m.y, (int)m.anchor_x, (int)m.anchor_y);
-            if (dist_anchor > MINION_CHASE_LIMIT * MINION_CHASE_LIMIT) {
-                m.state = Minion::RETURNING; m.target_id = 0;
-            } else {
+            if (dist_anchor > MINION_CHASE_LIMIT * MINION_CHASE_LIMIT) { m.state = Minion::RETURNING; m.target_id = 0; }
+            else {
                 int tx = 0, ty = 0; bool exists = false;
                 Player* p = get_player_by_id(m.target_id);
                 if (p) { tx = p->x; ty = p->y; exists = true; }
-                else if (minions.count(m.target_id) && minions[m.target_id].hp > 0) {
-                    tx = (int)minions[m.target_id].x; ty = (int)minions[m.target_id].y; exists = true;
-                } else if (towers.count(m.target_id) && towers[m.target_id].hp > 0) {
-                    tx = towers[m.target_id].x; ty = towers[m.target_id].y; exists = true;
-                }
-
+                else if (minions.count(m.target_id) && minions[m.target_id].hp > 0) { tx = (int)minions[m.target_id].x; ty = (int)minions[m.target_id].y; exists = true; }
+                else if (towers.count(m.target_id) && towers[m.target_id].hp > 0) { tx = towers[m.target_id].x; ty = towers[m.target_id].y; exists = true; }
                 if (!exists) m.state = Minion::RETURNING;
                 else {
                     int dist_target = dist_sq((int)m.x, (int)m.y, tx, ty);
                     int atk_range_bonus = (m.target_id >= 100 && m.target_id < 1000) ? 2 : 0;
                     if (dist_target <= (m.range + atk_range_bonus) * (m.range + atk_range_bonus)) {
                         if (now - m.last_attack_time >= MINION_ATK_COOLDOWN) {
-                            m.last_attack_time = now;
-                            m.visual_end_time = now + 200; 
-                            // [修复] 扣血
+                            m.last_attack_time = now; m.visual_end_time = now + 200; 
                             if (p) p->hp -= m.dmg;
                             else if (minions.count(m.target_id)) minions[m.target_id].hp -= m.dmg;
                             else if (towers.count(m.target_id)) towers[m.target_id].hp -= m.dmg; 
                         }
                     } else {
-                        float dx = tx - m.x, dy = ty - m.y;
-                        float dist = sqrt(dx*dx + dy*dy);
+                        float dx = tx - m.x, dy = ty - m.y; float dist = sqrt(dx*dx + dy*dy);
                         m.x += (dx/dist) * MINION_MOVE_SPEED; m.y += (dy/dist) * MINION_MOVE_SPEED;
                     }
                 }
             }
         }
         else if (m.state == Minion::RETURNING) {
-            float dx = m.anchor_x - m.x, dy = m.anchor_y - m.y;
-            float dist = sqrt(dx*dx + dy*dy);
+            float dx = m.anchor_x - m.x, dy = m.anchor_y - m.y; float dist = sqrt(dx*dx + dy*dy);
             if (dist < 1.0f) m.state = Minion::MARCHING;
             else { m.x += (dx/dist) * (MINION_MOVE_SPEED * 2.0f); m.y += (dy/dist) * (MINION_MOVE_SPEED * 2.0f); }
         }
@@ -393,7 +461,6 @@ void update_minions() {
     for (int id : dead_ids) minions.erase(id);
 }
 
-// === 玩家攻击 (修复版) ===
 bool handle_attack(int attacker_fd) {
     if (players.count(attacker_fd) == 0) return false;
     Player& att = players[attacker_fd];
@@ -417,25 +484,41 @@ bool handle_attack(int attacker_fd) {
     for (auto& t : towers) {
         if (t.second.team == att.color || t.second.hp <= 0) continue;
         int d = dist_sq(att.x, att.y, t.second.x, t.second.y);
-        // 塔的碰撞体积稍微大一点
         if (d <= range_sq + 10 && d < min_dist) { min_dist = d; target_id = t.second.id; }
+    }
+    
+    // [新增] 检测野怪
+    for (auto& m : jungle_mobs) {
+        int d = dist_sq(att.x, att.y, m.second.x, m.second.y);
+        // 野怪体积大，判断距离稍微放宽
+        if (d <= range_sq + 5 && d < min_dist) { min_dist = d; target_id = m.second.id; }
     }
 
     if (target_id != 0) {
         att.current_target_id = target_id; 
         att.visual_end_time = get_current_ms() + 200; 
         hit = true;
+        
+        long long now = get_current_ms();
 
         Player* p = get_player_by_id(target_id);
         if (p) {
             p->hp -= tmpl.attack_dmg; 
             p->current_effect = EFFECT_HIT;
-            att.last_aggressive_time = get_current_ms(); // 产生仇恨
+            att.last_aggressive_time = now; 
             if (p->hp <= 0) {
-                p->hp = p->max_hp;
-                p->x = (p->color == 1) ? 22 : 128;
-                p->y = (p->color == 1) ? 128 : 22;
+                p->hp = p->max_hp; p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
                 std::cout << "[Kill] Player " << p->id << " died." << std::endl;
+            }
+        } else if (target_id >= JUNGLE_ID_START) {
+            // [新增] 攻击野怪
+            if (jungle_mobs.count(target_id)) {
+                JungleMonster& mob = jungle_mobs[target_id];
+                mob.hp -= tmpl.attack_dmg;
+                // 仇恨触发
+                mob.target_id = att.id;
+                mob.last_hit_by_time = now; // 刷新脱战计时
+                std::cout << "Monster " << mob.id << " hit, HP: " << mob.hp << std::endl;
             }
         } else if (target_id >= MINION_ID_START) {
             if (minions.count(target_id)) minions[target_id].hp -= tmpl.attack_dmg;
@@ -475,6 +558,16 @@ void broadcast_world() {
         GamePacket pkt = { TYPE_UPDATE, m.id, (int)m.x, (int)m.y, m.type, 0, m.team, m.hp, m.max_hp, 0, 0, atk_target };
         updates.push_back(pkt);
     }
+    // [新增] Jungle
+    for (auto& pair : jungle_mobs) {
+        JungleMonster& m = pair.second;
+        if (m.hp > 0) {
+            int atk_target = (now < m.visual_end_time) ? m.target_id : 0;
+            // 使用 input 字段传输野怪类型 (STD/RED/BLUE)
+            GamePacket pkt = { TYPE_UPDATE, m.id, m.x, m.y, m.type, 0, 0, m.hp, m.max_hp, 0, 0, atk_target };
+            updates.push_back(pkt);
+        }
+    }
 
     GamePacket end_pkt; memset(&end_pkt, 0, sizeof(end_pkt)); 
     end_pkt.type = TYPE_FRAME;
@@ -492,6 +585,7 @@ void broadcast_world() {
 int main() {
     MapGenerator::init(game_map);
     init_towers(); 
+    init_jungle(); // [新增]
     game_start_time = get_current_ms();
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -567,7 +661,12 @@ int main() {
         }
 
         update_towers(); 
+        update_jungle(); // [新增]
         if (!minions.empty()) { update_minions(); need_broadcast = true; }
+        // 野怪在不动的时候不需要每帧广播，但如果被打或者回血了需要广播
+        // 简化起见，只要野怪活着就广播，或者优化逻辑（这里先简单处理）
+        if(!jungle_mobs.empty()) need_broadcast = true;
+
         if (need_broadcast) broadcast_world();
     }
     return 0;

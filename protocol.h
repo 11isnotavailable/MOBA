@@ -51,23 +51,41 @@ struct GamePacket {
 };
 
 // ==========================================
-// [数值平衡 5.0] 
+// [数值平衡 6.0 - 野怪更新] 
 // ==========================================
 
 // ID 分段
 #define TOWER_ID_START        101
 #define MINION_ID_START       10000   
+#define JUNGLE_ID_START       50000   // [新增] 野怪ID段
+
+// 野怪类型
+#define MONSTER_TYPE_STD      1  // 普通野怪 (狼/猪)
+#define MONSTER_TYPE_RED      2  // 红Buff
+#define MONSTER_TYPE_BLUE     3  // 蓝Buff
+
+// 野怪数值
+#define MONSTER_STD_HP        8000
+#define MONSTER_STD_DMG       100
+#define MONSTER_STD_RANGE     6
+#define MONSTER_BUFF_HP       15000
+#define MONSTER_BUFF_DMG      150
+#define MONSTER_BUFF_RANGE    7
+
+#define MONSTER_ATK_COOLDOWN  2000    // 2秒一次
+#define MONSTER_AGGRO_TIMEOUT 4000    // 4秒脱战
+#define MONSTER_REGEN_TICK    3000    // 脱战后每秒回血量
 
 // 防御塔配置
 #define TOWER_HP_TIER_1       10000
 #define TOWER_HP_TIER_2       12000
 #define TOWER_HP_TIER_3       15000
 #define TOWER_ATK_RANGE       8       
-#define TOWER_ATK_COOLDOWN    2000    // 2秒一次
+#define TOWER_ATK_COOLDOWN    2000    
 
 // 塔的伤害基数
-#define TOWER_BASE_DMG_MINION 300     // +100n
-#define TOWER_BASE_DMG_HERO   300     // 300 * 2^hits
+#define TOWER_BASE_DMG_MINION 300     
+#define TOWER_BASE_DMG_HERO   300     
 
 // 小兵配置
 #define MINION_MOVE_SPEED     0.1f    
@@ -76,13 +94,10 @@ struct GamePacket {
 #define MINION_TYPE_MELEE     1       
 #define MINION_TYPE_RANGED    2       
 
-// 小兵数值公式
-// 近战: 1000 + 200n 血, 100 + 150n 攻
 #define MELEE_BASE_HP         1000    
 #define MELEE_BASE_DMG        100     
 #define MELEE_RANGE           1       
 
-// 远程: 600 + 150n 血, 100 + 200n 攻
 #define RANGED_BASE_HP        600     
 #define RANGED_BASE_DMG       100     
 #define RANGED_RANGE          5       

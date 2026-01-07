@@ -47,7 +47,6 @@ void add_log(std::string msg) {
 bool is_walkable(int x, int y) {
     if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return false;
     int t = game_map[y][x];
-    // 允许通过基座(10)，不允许墙(1)
     if (t == TILE_WALL) return false;
     return true;
 }
@@ -106,8 +105,6 @@ void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) 
                 if (wx>=0 && wx<MAP_SIZE && wy>=0 && wy<MAP_SIZE) {
                      int tile = game_map[wy][wx];
                      int final_color = base_color_idx; 
-                     
-                     // 只有在空地或河道才画圈，避免覆盖墙壁
                      if (tile == TILE_EMPTY) {
                         attron(COLOR_PAIR(final_color)); mvprintw(sy + ui_offset, sx * 2, "·"); attroff(COLOR_PAIR(final_color));
                      }
@@ -171,15 +168,12 @@ void draw_map() {
             if (tile == TILE_WALL) { attron(COLOR_PAIR(4)); mvprintw(dy + ui_offset, dx * 2, "♣ "); attroff(COLOR_PAIR(4)); }
             else if (tile == TILE_RIVER) { attron(COLOR_PAIR(5)); mvprintw(dy + ui_offset, dx * 2, "~~"); attroff(COLOR_PAIR(5)); }
             else if (tile == TILE_BASE) {
-                // 水晶的攻击范围在 Layer 2 画，这里只画图标
                 attron(COLOR_PAIR(7) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "★ "); attroff(COLOR_PAIR(7) | A_BOLD);
             }
             else if (tile == TILE_TOWER_WALL) { 
-                // 基座永久渲染
                 attron(COLOR_PAIR(8) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "##"); attroff(COLOR_PAIR(8) | A_BOLD); 
             }
             else if (tile >= 11 && tile <= 23) {
-                // 塔的静态位置不画东西，留给动态实体画，或者画个地基点
                 attron(COLOR_PAIR(16)); if((wx+wy)%9==0) mvprintw(dy + ui_offset, dx * 2, "."); attroff(COLOR_PAIR(16));
             }
             else { attron(COLOR_PAIR(16)); if((wx+wy) % 9 == 0) mvprintw(dy + ui_offset, dx * 2, "·"); attroff(COLOR_PAIR(16)); }
@@ -188,20 +182,15 @@ void draw_map() {
     
     draw_destination_marker();
 
-    // --- Layer 2: 范围圈 (地板之上，单位之下) ---
-    // 2.1 玩家范围
+    // --- Layer 2: 范围圈 ---
     if(has_my_data) { draw_range_circle(my_status.x, my_status.y, my_status.attack_range, 30); }
-    
-    // 2.2 防御塔范围 (遍历活着的塔)
     for(const auto& p : world_state) {
-        if (p.id >= 101 && p.id < 1000) { // 塔
+        if (p.id >= 101 && p.id < 1000) { 
             int range_color = (p.color == 1) ? 31 : 32;
             draw_range_circle(p.x, p.y, 6, range_color);
         }
     }
-    
-    // 2.3 水晶范围 (静态计算，因为水晶位置固定且无实体ID包)
-    // 重新遍历视野内的Tile找水晶
+    // 水晶范围
     for (int dy = 0; dy < current_view_h; dy++) {
         for (int dx = 0; dx < current_view_w; dx++) {
             int wx = cam_x + dx; int wy = cam_y + dy;
@@ -212,38 +201,59 @@ void draw_map() {
         }
     }
 
-    // --- Layer 3: 普通单位 (小兵、塔本体、塔血条) ---
+    // --- Layer 3: 普通单位 (小兵、塔、野怪) ---
     for(const auto& p : world_state) {
         int sx = p.x - cam_x; int sy = p.y - cam_y;
         if (sx < 0 || sx >= current_view_w || sy < 0 || sy >= current_view_h) continue;
 
-        if (p.id >= MINION_ID_START) { // 小兵
-            int color = (p.color == 1) ? 36 : 32; // 蓝方36(深蓝)，红方32
+        // 小兵
+        if (p.id >= MINION_ID_START && p.id < JUNGLE_ID_START) { 
+            int color = (p.color == 1) ? 36 : 32; 
             char symbol = (p.input == MINION_TYPE_MELEE) ? 'o' : 'i';
             attron(COLOR_PAIR(color) | A_BOLD); mvprintw(sy + ui_offset, sx * 2, "%c ", symbol); attroff(COLOR_PAIR(color) | A_BOLD);
         } 
-        else if (p.id >= 101 && p.id < 1000) { // 防御塔
+        // 野怪
+        else if (p.id >= JUNGLE_ID_START) {
+            int hp_color = 20; // 默认黄血条
+            draw_mini_hp_bar(sx, sy - 1, p.hp, p.max_hp, hp_color);
+
+            if (p.input == MONSTER_TYPE_STD) {
+                // 普通野怪: 宽2格，高1格
+                // 渲染为: (oo) 这种类似猛兽的眼睛/獠牙
+                attron(COLOR_PAIR(20) | A_BOLD); // 黄色/棕色
+                mvprintw(sy + ui_offset, sx * 2, "(``)"); 
+                attroff(COLOR_PAIR(20) | A_BOLD);
+            }
+            else {
+                // Buff: 宽1格，高2格，反色背景
+                // Red Buff = 红色反色，Blue Buff = 蓝色反色
+                int color_pair = (p.input == MONSTER_TYPE_RED) ? 13 : 36; // 13:红白, 36:蓝白(需改为深蓝背景)
+                // 注意：为了好看，这里需要利用 ncurses 的 A_REVERSE
+                
+                attron(COLOR_PAIR(color_pair) | A_REVERSE | A_BOLD);
+                char label = (p.input == MONSTER_TYPE_RED) ? 'R' : 'B';
+                mvprintw(sy + ui_offset, sx * 2, "%c ", label);     // 上半部分
+                // [修复] 删除了这里多余的 label 参数
+                mvprintw(sy + ui_offset + 1, sx * 2, "!!");         // 下半部分
+                attroff(COLOR_PAIR(color_pair) | A_REVERSE | A_BOLD);
+            }
+        }
+        // 防御塔
+        else if (p.id >= 101 && p.id < 1000) { 
             int color = (p.color == 1) ? 4 : 2; 
             int bar_color = (p.color == 1) ? 14 : 13; 
-            
-            // 血条 (在塔上方)
             draw_mini_hp_bar(sx, sy - 2, p.hp, p.max_hp, bar_color);
-
-            // 塔身
             const char* label = "?";
-            if (p.max_hp == 10000) label = "V ";
-            else if (p.max_hp == 12000) label = "M ";
-            else label = "H ";
-            
+            if (p.max_hp == 10000) label = "V "; else if (p.max_hp == 12000) label = "M "; else label = "H ";
             attron(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
             mvprintw(sy + ui_offset, sx * 2, "%s", label); 
             attroff(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
         }
     }
 
-    // --- Layer 4: 英雄 (永远在最上层) ---
+    // --- Layer 4: 英雄 ---
     for(const auto& p : world_state) {
-        if (p.id < 100) { // 英雄ID范围 1-99
+        if (p.id < 100) { 
             bool is_me = (p.id == my_player_id);
             draw_hero_visual(p.x, p.y, p.input, p.color, is_me, p.effect);
         }
@@ -253,12 +263,8 @@ void draw_map() {
     for(const auto& p : world_state) {
         if (p.attack_target_id > 0) {
             int tx = 0, ty = 0;
-            // 在 world_state 找目标
+            // 查找目标位置 (包括野怪)
             for(const auto& t : world_state) { if (t.id == p.attack_target_id) { tx = t.x; ty = t.y; break; } }
-            // 如果没找到(可能目标刚死或在视野外)，尝试在静态塔里找位置(针对打塔的情况)
-            if (tx == 0) {
-                // 这里简单处理：如果目标是塔且没在视野内更新，激光可能会指向(0,0)，忽略
-            }
             if (tx != 0) draw_laser_line(p.x, p.y, tx, ty);
         }
     }
@@ -354,7 +360,6 @@ int main() {
         init_pair(32, COLOR_RED, COLOR_WHITE); init_pair(33, COLOR_GREEN, COLOR_CYAN); 
         init_pair(34, COLOR_BLACK, COLOR_CYAN); init_pair(35, COLOR_RED, COLOR_CYAN);   
         
-        // [修改] 36号色：深蓝
         init_pair(36, COLOR_BLUE, COLOR_WHITE); 
     }
 
