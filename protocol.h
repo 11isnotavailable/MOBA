@@ -9,14 +9,14 @@
 #define TILE_BASE    2  
 #define TILE_RIVER   4  
 
-// === 防御塔 (地图块定义) ===
+// === 防御塔 ===
 #define TILE_TOWER_WALL  10 
-#define TILE_TOWER_B_1   11 // 蓝1塔 (10000 HP)
-#define TILE_TOWER_B_2   12 // 蓝2塔 (12000 HP)
-#define TILE_TOWER_B_3   13 // 蓝3塔 (15000 HP)
-#define TILE_TOWER_R_1   21 // 红1塔
-#define TILE_TOWER_R_2   22 // 红2塔
-#define TILE_TOWER_R_3   23 // 红3塔
+#define TILE_TOWER_B_1   11 
+#define TILE_TOWER_B_2   12 
+#define TILE_TOWER_B_3   13 
+#define TILE_TOWER_R_1   21 
+#define TILE_TOWER_R_2   22 
+#define TILE_TOWER_R_3   23 
 
 // === 英雄 ===
 #define HERO_WARRIOR 1
@@ -51,20 +51,23 @@ struct GamePacket {
 };
 
 // ==========================================
-// [数值平衡 3.0] 
+// [数值平衡 5.0] 
 // ==========================================
 
-// ID 分段规则
-// 1-100: 玩家
-// 101-200: 防御塔/水晶 (新增)
-// 10000+: 小兵
+// ID 分段
 #define TOWER_ID_START        101
 #define MINION_ID_START       10000   
 
-// 防御塔血量
+// 防御塔配置
 #define TOWER_HP_TIER_1       10000
 #define TOWER_HP_TIER_2       12000
 #define TOWER_HP_TIER_3       15000
+#define TOWER_ATK_RANGE       8       
+#define TOWER_ATK_COOLDOWN    2000    // 2秒一次
+
+// 塔的伤害基数
+#define TOWER_BASE_DMG_MINION 300     // +100n
+#define TOWER_BASE_DMG_HERO   300     // 300 * 2^hits
 
 // 小兵配置
 #define MINION_MOVE_SPEED     0.1f    
@@ -73,15 +76,22 @@ struct GamePacket {
 #define MINION_TYPE_MELEE     1       
 #define MINION_TYPE_RANGED    2       
 
-#define MELEE_HP              300
-#define MELEE_DMG             8
+// 小兵数值公式
+// 近战: 1000 + 200n 血, 100 + 150n 攻
+#define MELEE_BASE_HP         1000    
+#define MELEE_BASE_DMG        100     
 #define MELEE_RANGE           1       
 
-#define RANGED_HP             150
-#define RANGED_DMG            15
+// 远程: 600 + 150n 血, 100 + 200n 攻
+#define RANGED_BASE_HP        600     
+#define RANGED_BASE_DMG       100     
 #define RANGED_RANGE          5       
 
 #define MINION_VISION_RANGE   4       
 #define MINION_CHASE_LIMIT    10      
+
+// 英雄数值
+#define HERO_HP_DEFAULT       2000
+#define HERO_DMG_DEFAULT      500
 
 #endif
