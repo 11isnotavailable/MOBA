@@ -107,21 +107,28 @@ void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) 
     for (int dy = -r; dy <= r; dy++) {
         for (int dx = -r; dx <= r; dx++) {
             int wx = world_x + dx; int wy = world_y + dy;
+            
+            // 圆形判定
             if (dx*dx + dy*dy <= range * range) {
                 int sx = wx - cam_x; int sy = wy - cam_y;
                 if (sx < 0 || sx >= current_view_w || sy < 0 || sy >= current_view_h) continue;
+                
                 if (wx>=0 && wx<MAP_SIZE && wy>=0 && wy<MAP_SIZE) {
                      int tile = game_map[wy][wx];
                      int final_color = base_color_idx; 
+                     
+                     // 如果是在空地上
                      if (tile == TILE_EMPTY) {
                         attron(COLOR_PAIR(final_color)); 
                         mvprintw(sy + ui_offset, sx * 2, "·"); 
                         attroff(COLOR_PAIR(final_color));
                      }
+                     // 如果是在河道上
                      else if (tile == TILE_RIVER) {
                         if (base_color_idx == 30) final_color = 33;
                         else if (base_color_idx == 31) final_color = 34; 
                         else if (base_color_idx == 32) final_color = 35;
+                        
                         attron(COLOR_PAIR(final_color)); 
                         mvprintw(sy + ui_offset, sx * 2, "·"); 
                         attroff(COLOR_PAIR(final_color));
@@ -174,7 +181,17 @@ void draw_map() {
                 attron(COLOR_PAIR(5)); mvprintw(dy + ui_offset, dx * 2, "~~"); attroff(COLOR_PAIR(5));
             }
             else if (tile == TILE_BASE) {
-                attron(COLOR_PAIR(7) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "★ "); attroff(COLOR_PAIR(7) | A_BOLD);
+                // [新增] 绘制水晶攻击范围
+                // 蓝方基地在左下 (wx < 75)，红方基地在右上 (wx >= 75)
+                int range_color = (wx < 75) ? 31 : 32;
+                
+                // 绘制范围圈 (半径8)
+                draw_range_circle(wx, wy, 8, range_color);
+
+                // 绘制水晶本体
+                attron(COLOR_PAIR(7) | A_BOLD); 
+                mvprintw(dy + ui_offset, dx * 2, "★ "); 
+                attroff(COLOR_PAIR(7) | A_BOLD);
             }
             else if (tile == TILE_TOWER_WALL) {
                 attron(COLOR_PAIR(8) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "##"); attroff(COLOR_PAIR(8) | A_BOLD);
@@ -184,10 +201,12 @@ void draw_map() {
                 int color = is_blue ? 4 : 2; 
                 int range_color = is_blue ? 31 : 32;
                 draw_range_circle(wx, wy, 6, range_color);
+                
                 const char* label = "?";
                 if (tile == TILE_TOWER_B_1 || tile == TILE_TOWER_R_1) label = "V ";
                 if (tile == TILE_TOWER_B_2 || tile == TILE_TOWER_R_2) label = "M ";
                 if (tile == TILE_TOWER_B_3 || tile == TILE_TOWER_R_3) label = "H ";
+                
                 attron(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
                 mvprintw(dy + ui_offset, dx * 2, "%s", label); 
                 attroff(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
@@ -406,7 +425,6 @@ int main() {
         } 
         else if (is_auto_moving && has_my_data) {
             // [发包限流] 只有当距离上次发包超过 60ms 时才发送
-            // 这能防止卡住时瞬间发送几百个包堵死缓冲区
             if (current_time - last_auto_move_time > 60) {
                 last_auto_move_time = current_time;
 
@@ -451,7 +469,6 @@ int main() {
                     }
 
                     if (move_dx == 0 && move_dy == 0) {
-                        // 实在走投无路，尝试强行移动一步，交给服务器判定
                          if (diff_x > 0) move_dx = 1; else if (diff_x < 0) move_dx = -1;
                          if (diff_y > 0) move_dy = 1; else if (diff_y < 0) move_dy = -1;
                     }
