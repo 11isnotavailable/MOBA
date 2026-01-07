@@ -15,6 +15,7 @@
 // === 全局 ===
 int game_map[MAP_SIZE][MAP_SIZE];
 std::vector<GamePacket> world_state;
+std::vector<GamePacket> effects_state; 
 GamePacket my_status;
 bool has_my_data = false;
 int my_player_id = -1;
@@ -29,7 +30,6 @@ int last_pos_x = -1, last_pos_y = -1;
 int stuck_frames = 0;
 long long last_auto_move_time = 0;
 
-char debug_msg[128] = "Ready."; 
 const int UI_TOP_HEIGHT = 1;
 const int UI_BOTTOM_HEIGHT = 6;
 
@@ -92,7 +92,6 @@ void draw_destination_marker() {
     }
 }
 
-// 绘制攻击范围圈 (位于底层)
 void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) {
     int r = range; 
     int ui_offset = UI_TOP_HEIGHT;
@@ -120,7 +119,6 @@ void draw_range_circle(int world_x, int world_y, int range, int base_color_idx) 
     }
 }
 
-// 绘制英雄
 void draw_hero_visual(int world_x, int world_y, int hero_id, int color_id, bool is_me, int effect) {
     int sx = world_x - cam_x; int sy = world_y - cam_y;
     int ui_offset = UI_TOP_HEIGHT;
@@ -139,7 +137,6 @@ void draw_hero_visual(int world_x, int world_y, int hero_id, int color_id, bool 
     attroff(attr);
 }
 
-// 绘制小血条
 void draw_mini_hp_bar(int sx, int sy, int hp, int max_hp, int color_pair) {
     int ui_offset = UI_TOP_HEIGHT;
     if (sx < 0 || sx >= current_view_w || sy < 0 || sy >= current_view_h) return;
@@ -153,12 +150,88 @@ void draw_mini_hp_bar(int sx, int sy, int hp, int max_hp, int color_pair) {
     attroff(COLOR_PAIR(color_pair) | A_BOLD);
 }
 
-// === 核心渲染函数 (分层绘制) ===
+// [新增] 绘制喷泉式技能特效
+void draw_effect_fountain(int cx, int cy) {
+    int ui_offset = UI_TOP_HEIGHT;
+    // 渲染模式：从中心向外，高度降低
+    // 中心 (x, y) 高度4 (y-3 到 y)
+    // 左右1 (x-1, x+1) 高度2 (y-1 到 y)
+    // 左右2 (x-2, x+2) 高度1 (y)
+    
+    // 结构: (dx, height, color_attr)
+    // 41:深紫(中心), 35:紫(中), 40:浅紫(外)
+    struct Col { int dx; int h; int color; };
+    std::vector<Col> cols = {
+        {0, 4, COLOR_PAIR(41) | A_REVERSE | A_BOLD}, 
+        {-1, 2, COLOR_PAIR(35) | A_BOLD}, {1, 2, COLOR_PAIR(35) | A_BOLD},
+        {-2, 1, COLOR_PAIR(40) | A_BOLD}, {2, 1, COLOR_PAIR(40) | A_BOLD}
+    };
+
+    for (const auto& c : cols) {
+        int wx = cx + c.dx;
+        int sx = wx - cam_x;
+        if (sx < 0 || sx >= current_view_w) continue;
+        
+        for (int h = 0; h < c.h; h++) {
+            int wy = cy - h; // 向上延伸
+            int sy = wy - cam_y;
+            if (sy < 0 || sy >= current_view_h) continue;
+
+            // 绘制
+            attron(c.color);
+            const char* ch = (h == c.h - 1) ? "^^" : "||"; // 顶端尖锐
+            mvprintw(sy + ui_offset, sx * 2, "%s", ch);
+            attroff(c.color);
+        }
+    }
+}
+
+void draw_effect_floor(int cx, int cy, int range, int type) {
+    if (type == VFX_OVERLORD_DMG) {
+        // [新增] 喷泉爆发特效，不再画圆，而是画立体柱
+        draw_effect_fountain(cx, cy);
+        return;
+    }
+
+    int r = range;
+    int ui_offset = UI_TOP_HEIGHT;
+    int color = 0;
+    
+    if (type == VFX_OVERLORD_WARN) color = 40; // 浅紫
+    else if (type == VFX_TYRANT_WAVE) color = 40; // 浅紫
+
+    int wave_r = -1;
+    if (type == VFX_TYRANT_WAVE) {
+        long long ms = get_current_ms();
+        wave_r = (ms / 150) % (range + 1); 
+    }
+
+    for (int dy = -r; dy <= r; dy++) {
+        for (int dx = -r; dx <= r; dx++) {
+            if (dx*dx + dy*dy <= r*r) {
+                int wx = cx + dx, wy = cy + dy;
+                int sx = wx - cam_x, sy = wy - cam_y;
+                if (sx < 0 || sx >= current_view_w || sy < 0 || sy >= current_view_h) continue;
+                
+                attron(COLOR_PAIR(color));
+                char c = '.'; 
+                if (type == VFX_TYRANT_WAVE && abs((int)sqrt(dx*dx + dy*dy) - wave_r) < 1) {
+                    attron(A_BOLD | A_REVERSE); c = 'O'; 
+                }
+                mvprintw(sy + ui_offset, sx * 2, "%c ", c);
+                if (type == VFX_TYRANT_WAVE && abs((int)sqrt(dx*dx + dy*dy) - wave_r) < 1) attroff(A_BOLD | A_REVERSE);
+                attroff(COLOR_PAIR(color));
+            }
+        }
+    }
+}
+
+// === 核心渲染函数 ===
 void draw_map() {
     erase(); 
     int ui_offset = UI_TOP_HEIGHT;
     
-    // --- Layer 1: 静态地形 (地板、墙、基座) ---
+    // --- Layer 1: 静态地形 ---
     for (int dy = 0; dy < current_view_h; dy++) {
         for (int dx = 0; dx < current_view_w; dx++) {
             int wx = cam_x + dx; int wy = cam_y + dy;
@@ -167,19 +240,18 @@ void draw_map() {
             
             if (tile == TILE_WALL) { attron(COLOR_PAIR(4)); mvprintw(dy + ui_offset, dx * 2, "♣ "); attroff(COLOR_PAIR(4)); }
             else if (tile == TILE_RIVER) { attron(COLOR_PAIR(5)); mvprintw(dy + ui_offset, dx * 2, "~~"); attroff(COLOR_PAIR(5)); }
-            else if (tile == TILE_BASE) {
-                attron(COLOR_PAIR(7) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "★ "); attroff(COLOR_PAIR(7) | A_BOLD);
-            }
-            else if (tile == TILE_TOWER_WALL) { 
-                attron(COLOR_PAIR(8) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "##"); attroff(COLOR_PAIR(8) | A_BOLD); 
-            }
-            else if (tile >= 11 && tile <= 23) {
-                attron(COLOR_PAIR(16)); if((wx+wy)%9==0) mvprintw(dy + ui_offset, dx * 2, "."); attroff(COLOR_PAIR(16));
-            }
+            else if (tile == TILE_BASE) { attron(COLOR_PAIR(7) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "★ "); attroff(COLOR_PAIR(7) | A_BOLD); }
+            else if (tile == TILE_TOWER_WALL) { attron(COLOR_PAIR(8) | A_BOLD); mvprintw(dy + ui_offset, dx * 2, "##"); attroff(COLOR_PAIR(8) | A_BOLD); }
+            else if (tile >= 11 && tile <= 23) { attron(COLOR_PAIR(16)); if((wx+wy)%9==0) mvprintw(dy + ui_offset, dx * 2, "."); attroff(COLOR_PAIR(16)); }
             else { attron(COLOR_PAIR(16)); if((wx+wy) % 9 == 0) mvprintw(dy + ui_offset, dx * 2, "·"); attroff(COLOR_PAIR(16)); }
         }
     }
     
+    // [Updated] Layer 1.5: 技能地板特效
+    for (const auto& eff : effects_state) {
+        draw_effect_floor(eff.x, eff.y, eff.attack_range, eff.input); 
+    }
+
     draw_destination_marker();
 
     // --- Layer 2: 范围圈 ---
@@ -190,7 +262,6 @@ void draw_map() {
             draw_range_circle(p.x, p.y, 6, range_color);
         }
     }
-    // 水晶范围
     for (int dy = 0; dy < current_view_h; dy++) {
         for (int dx = 0; dx < current_view_w; dx++) {
             int wx = cam_x + dx; int wy = cam_y + dy;
@@ -201,53 +272,57 @@ void draw_map() {
         }
     }
 
-    // --- Layer 3: 普通单位 (小兵、塔、野怪) ---
+    // --- Layer 3: 普通单位 ---
     for(const auto& p : world_state) {
         int sx = p.x - cam_x; int sy = p.y - cam_y;
         if (sx < 0 || sx >= current_view_w || sy < 0 || sy >= current_view_h) continue;
 
-        // 小兵
         if (p.id >= MINION_ID_START && p.id < JUNGLE_ID_START) { 
             int color = (p.color == 1) ? 36 : 32; 
             char symbol = (p.input == MINION_TYPE_MELEE) ? 'o' : 'i';
             attron(COLOR_PAIR(color) | A_BOLD); mvprintw(sy + ui_offset, sx * 2, "%c ", symbol); attroff(COLOR_PAIR(color) | A_BOLD);
         } 
-        // 野怪
-        else if (p.id >= JUNGLE_ID_START) {
-            int hp_color = 20; // 默认黄血条
-            draw_mini_hp_bar(sx, sy - 1, p.hp, p.max_hp, hp_color);
-
-            if (p.input == MONSTER_TYPE_STD) {
-                // 普通野怪: 宽2格，高1格
-                // 渲染为: (oo) 这种类似猛兽的眼睛/獠牙
-                attron(COLOR_PAIR(20) | A_BOLD); // 黄色/棕色
-                mvprintw(sy + ui_offset, sx * 2, "(``)"); 
-                attroff(COLOR_PAIR(20) | A_BOLD);
-            }
+        else if (p.id >= JUNGLE_ID_START && p.id < 90000) { 
+            int hp_color = 20; draw_mini_hp_bar(sx, sy - 1, p.hp, p.max_hp, hp_color);
+            if (p.input == MONSTER_TYPE_STD) { attron(COLOR_PAIR(20)|A_BOLD); mvprintw(sy + ui_offset, sx * 2, "(``)"); attroff(COLOR_PAIR(20)|A_BOLD); }
             else {
-                // Buff: 宽1格，高2格，反色背景
-                // Red Buff = 红色反色，Blue Buff = 蓝色反色
-                int color_pair = (p.input == MONSTER_TYPE_RED) ? 13 : 36; // 13:红白, 36:蓝白(需改为深蓝背景)
-                // 注意：为了好看，这里需要利用 ncurses 的 A_REVERSE
-                
+                int color_pair = (p.input == MONSTER_TYPE_RED) ? 13 : 36;
                 attron(COLOR_PAIR(color_pair) | A_REVERSE | A_BOLD);
                 char label = (p.input == MONSTER_TYPE_RED) ? 'R' : 'B';
-                mvprintw(sy + ui_offset, sx * 2, "%c ", label);     // 上半部分
-                // [修复] 删除了这里多余的 label 参数
-                mvprintw(sy + ui_offset + 1, sx * 2, "!!");         // 下半部分
+                mvprintw(sy + ui_offset, sx * 2, "%c ", label); 
+                mvprintw(sy + ui_offset + 1, sx * 2, "!!");
                 attroff(COLOR_PAIR(color_pair) | A_REVERSE | A_BOLD);
             }
         }
-        // 防御塔
+        else if (p.id >= 90000) { 
+            int hp_color = 12; 
+            if (p.input == BOSS_TYPE_OVERLORD) { 
+                // [修改] 主宰体型 3x4
+                draw_mini_hp_bar(sx, sy - 3, p.hp, p.max_hp, hp_color);
+                attron(COLOR_PAIR(35) | A_BOLD); 
+                // 绘制: 宽3(x-1,0,1) 高4(y-3,y-2,y-1,y)
+                for(int dy = -3; dy <= 0; dy++) {
+                    int draw_sy = sy + ui_offset + dy;
+                    if (draw_sy >= 0 && draw_sy < LINES) {
+                        mvprintw(draw_sy, sx * 2 - 2, dy==-3?"/^^\\":"|{}|");
+                    }
+                }
+                attroff(COLOR_PAIR(35) | A_BOLD);
+            } else if (p.input == BOSS_TYPE_TYRANT) { 
+                // 暴君体型 4x2
+                draw_mini_hp_bar(sx, sy - 2, p.hp, p.max_hp, hp_color);
+                attron(COLOR_PAIR(20) | A_BOLD); 
+                mvprintw(sy + ui_offset, sx * 2 - 2, "<[TYRANT]>");
+                mvprintw(sy + ui_offset + 1, sx * 2 - 2, " /_||_\\ ");
+                attroff(COLOR_PAIR(20) | A_BOLD);
+            }
+        }
         else if (p.id >= 101 && p.id < 1000) { 
             int color = (p.color == 1) ? 4 : 2; 
             int bar_color = (p.color == 1) ? 14 : 13; 
             draw_mini_hp_bar(sx, sy - 2, p.hp, p.max_hp, bar_color);
-            const char* label = "?";
-            if (p.max_hp == 10000) label = "V "; else if (p.max_hp == 12000) label = "M "; else label = "H ";
-            attron(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
-            mvprintw(sy + ui_offset, sx * 2, "%s", label); 
-            attroff(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
+            const char* label = "?"; if (p.max_hp == 10000) label = "V "; else if (p.max_hp == 12000) label = "M "; else label = "H ";
+            attron(COLOR_PAIR(color) | A_BOLD | A_REVERSE); mvprintw(sy + ui_offset, sx * 2, "%s", label); attroff(COLOR_PAIR(color) | A_BOLD | A_REVERSE);
         }
     }
 
@@ -259,18 +334,16 @@ void draw_map() {
         }
     }
 
-    // --- Layer 5: 激光特效 ---
+    // --- Layer 5: 激光 ---
     for(const auto& p : world_state) {
         if (p.attack_target_id > 0) {
             int tx = 0, ty = 0;
-            // 查找目标位置 (包括野怪)
             for(const auto& t : world_state) { if (t.id == p.attack_target_id) { tx = t.x; ty = t.y; break; } }
             if (tx != 0) draw_laser_line(p.x, p.y, tx, ty);
         }
     }
 }
 
-// === UI ===
 void draw_bar(int y, int x, int width, int cur, int max, int color_pair, const char* label) {
     mvprintw(y, x, "%s", label);
     int bar_w = width - 6; float percent = (float)cur / max;
@@ -289,11 +362,8 @@ void draw_skill_box(int y, int x, char key, const char* name, int color) {
 void draw_ui() {
     int H = LINES; int W = COLS; int bottom_y = H - UI_BOTTOM_HEIGHT;
     attron(COLOR_PAIR(10)); mvhline(0, 0, ' ', W); 
-    
-    int m = current_game_time / 60;
-    int s = current_game_time % 60;
+    int m = current_game_time / 60; int s = current_game_time % 60;
     attron(COLOR_PAIR(10) | A_BOLD); mvprintw(0, 2, "Time: %02d:%02d", m, s); attroff(COLOR_PAIR(10) | A_BOLD);
-
     mvprintw(0, W - 15, "[Q] QUIT"); attroff(COLOR_PAIR(10));
     attron(COLOR_PAIR(11)); mvhline(bottom_y - 1, 0, ACS_HLINE, W); attroff(COLOR_PAIR(11));
     if (!has_my_data) return;
@@ -361,6 +431,11 @@ int main() {
         init_pair(34, COLOR_BLACK, COLOR_CYAN); init_pair(35, COLOR_RED, COLOR_CYAN);   
         
         init_pair(36, COLOR_BLUE, COLOR_WHITE); 
+
+        // [新增] Boss特效色 (紫)
+        init_pair(40, COLOR_MAGENTA, COLOR_BLACK); // 浅紫(地板)
+        init_pair(41, COLOR_MAGENTA, COLOR_WHITE); // 深紫
+        init_pair(35, COLOR_MAGENTA, COLOR_WHITE); // 主宰身躯
     }
 
     int sel = select_hero_screen();
@@ -433,13 +508,23 @@ int main() {
             int n = recv(sock, &recv_pkt, sizeof(recv_pkt), MSG_DONTWAIT);
             if (n <= 0) break;
             if (recv_pkt.type == TYPE_FRAME) { 
-                world_state = buf; buf.clear(); has_my_data = false;
+                world_state = buf; 
+                buf.clear(); 
+                effects_state.clear(); 
+                std::vector<GamePacket> entities;
+                for(const auto& p : world_state) {
+                   if (p.type == TYPE_EFFECT) effects_state.push_back(p);
+                   else entities.push_back(p);
+                }
+                world_state = entities; 
+
+                has_my_data = false;
                 current_game_time = recv_pkt.extra;
                 for(const auto& p : world_state) {
                     if (p.id == my_player_id) { my_status = p; has_my_data = true; update_camera(my_status.x, my_status.y); last_hp = my_status.hp; break; }
                 }
                 need_render = true;
-            } else if (recv_pkt.type == TYPE_UPDATE) buf.push_back(recv_pkt);
+            } else if (recv_pkt.type == TYPE_UPDATE || recv_pkt.type == TYPE_EFFECT) buf.push_back(recv_pkt);
         }
         
         if (need_render) { draw_map(); draw_ui(); refresh(); }

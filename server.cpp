@@ -81,28 +81,44 @@ struct Minion {
     long long visual_end_time; 
 };
 
-// [新增] 野怪结构体
-struct JungleMonster {
-    int id, type; 
-    int x, y; // 坐标
-    int hp, max_hp, dmg, range;
-    int target_id; // 当前仇恨目标
-    long long last_hit_by_time; // 上次被攻击的时间（用于脱战判断）
-    long long last_attack_time; // 上次攻击时间
-    long long last_regen_time;  // 上次回复时间
-    long long visual_end_time;  // 攻击特效
+struct SkillEffect {
+    int x, y;
+    int type; 
+    long long start_time;
+    long long end_time;
+    int radius;
+    int owner_id; 
 };
 
-// 容器
+struct JungleMonster {
+    int id, type; 
+    int x, y; 
+    int hp, max_hp, dmg, range;
+    int target_id; 
+    long long last_hit_by_time; 
+    long long last_attack_time; 
+    long long last_regen_time;  
+    long long visual_end_time;  
+
+    int attack_counter;         
+    enum BossState { IDLE, CASTING_PREPARE, CASTING_ACTIVE }; 
+    BossState boss_state;
+    long long skill_start_time; 
+    long long next_tick_time;   
+    std::vector<Point> skill_targets; 
+};
+
 std::map<int, Player> players; 
 std::map<int, Minion> minions;
 std::map<int, Tower> towers; 
-std::map<int, JungleMonster> jungle_mobs; // [新增]
+std::map<int, JungleMonster> jungle_mobs; 
+std::vector<SkillEffect> active_effects; 
 
 int global_id_counter = 1;
 int tower_id_counter = TOWER_ID_START;
 int minion_id_counter = MINION_ID_START;
-int jungle_id_counter = JUNGLE_ID_START; // [新增]
+int jungle_id_counter = JUNGLE_ID_START; 
+int boss_id_counter = BOSS_ID_START;
 int last_spawn_minute = -1; 
 
 Player* get_player_by_id(int id) {
@@ -154,129 +170,218 @@ void init_towers() {
     }
 }
 
-// [新增] 初始化野区
 void init_jungle() {
-    // 根据 map.h 的数据，野区由 create_penetrating_cross 生成
-    // 四个区域的 Top-Left 坐标和 Size(26)
-    // 中心点 = TL + 13
+    // [修改] Boss位置向中心迁移
+    // 主宰 (Overlord): 原(35,35) -> 向中心移动20格 -> (55, 55)
+    JungleMonster overlord;
+    overlord.id = boss_id_counter++;
+    overlord.type = BOSS_TYPE_OVERLORD;
+    overlord.x = 55; overlord.y = 55; // [Updated]
+    overlord.hp = OVERLORD_HP; overlord.max_hp = OVERLORD_HP;
+    overlord.dmg = OVERLORD_DMG; overlord.range = OVERLORD_RANGE;
+    overlord.target_id = 0; overlord.last_hit_by_time = 0;
+    overlord.last_attack_time = 0; overlord.last_regen_time = 0;
+    overlord.attack_counter = 0; overlord.boss_state = JungleMonster::IDLE;
+    jungle_mobs[overlord.id] = overlord;
+
+    // 暴君 (Tyrant): 原(115,115) -> 向中心移动20格 -> (95, 95)
+    JungleMonster tyrant;
+    tyrant.id = boss_id_counter++;
+    tyrant.type = BOSS_TYPE_TYRANT;
+    tyrant.x = 95; tyrant.y = 95; // [Updated]
+    tyrant.hp = TYRANT_HP; tyrant.max_hp = TYRANT_HP;
+    tyrant.dmg = TYRANT_DMG; tyrant.range = TYRANT_RANGE;
+    tyrant.target_id = 0; tyrant.last_hit_by_time = 0;
+    tyrant.last_attack_time = 0; tyrant.last_regen_time = 0;
+    tyrant.attack_counter = 0; tyrant.boss_state = JungleMonster::IDLE;
+    jungle_mobs[tyrant.id] = tyrant;
+
+    // 普通野区
     struct Zone { int x, y, size; int buff_type; };
     std::vector<Zone> zones = {
-        {56, 96, 26, MONSTER_TYPE_BLUE}, // South (Blue Buff for Bottom side?) - 暂定
-        {68, 28, 26, MONSTER_TYPE_RED},  // North
-        {28, 62, 26, MONSTER_TYPE_RED},  // West (Blue side Jungle)
-        {96, 62, 26, MONSTER_TYPE_BLUE}  // East (Red side Jungle)
+        {56, 96, 26, MONSTER_TYPE_BLUE}, 
+        {68, 28, 26, MONSTER_TYPE_RED}, 
+        {28, 62, 26, MONSTER_TYPE_RED}, 
+        {96, 62, 26, MONSTER_TYPE_BLUE} 
     };
 
     for (const auto& z : zones) {
-        // 1. 生成 Buff 怪 (位于十字中心)
         int cx = z.x + z.size / 2;
         int cy = z.y + z.size / 2;
         
         JungleMonster buff;
-        buff.id = jungle_id_counter++;
-        buff.type = z.buff_type; 
+        buff.id = jungle_id_counter++; buff.type = z.buff_type; 
         buff.x = cx; buff.y = cy;
         buff.hp = MONSTER_BUFF_HP; buff.max_hp = MONSTER_BUFF_HP;
         buff.dmg = MONSTER_BUFF_DMG; buff.range = MONSTER_BUFF_RANGE;
         buff.target_id = 0; buff.last_hit_by_time = 0;
         buff.last_attack_time = 0; buff.last_regen_time = 0;
+        buff.attack_counter = 0; buff.boss_state = JungleMonster::IDLE;
         jungle_mobs[buff.id] = buff;
 
-        // 2. 生成普通野怪 (随机分布，避开中心)
-        int std_count = 0;
-        int attempts = 0;
-        while(std_count < 3 && attempts < 50) { // 每个区域生成3个
+        int std_count = 0, attempts = 0;
+        while(std_count < 3 && attempts < 50) { 
             attempts++;
             int rx = z.x + 2 + rand() % (z.size - 4);
             int ry = z.y + 2 + rand() % (z.size - 4);
-
-            // 检查位置是否为空
             if (game_map[ry][rx] != TILE_EMPTY) continue;
-            // 检查是否离中心太近 (Buff的位置)
             if (dist_sq(rx, ry, cx, cy) < 25) continue;
-            // 检查是否重叠其他野怪
             bool overlap = false;
-            for(const auto& m : jungle_mobs) {
-                if (dist_sq(rx, ry, m.second.x, m.second.y) < 9) { overlap = true; break; }
-            }
+            for(const auto& m : jungle_mobs) { if (dist_sq(rx, ry, m.second.x, m.second.y) < 9) { overlap = true; break; } }
             if(overlap) continue;
 
             JungleMonster mob;
-            mob.id = jungle_id_counter++;
-            mob.type = MONSTER_TYPE_STD;
+            mob.id = jungle_id_counter++; mob.type = MONSTER_TYPE_STD;
             mob.x = rx; mob.y = ry;
             mob.hp = MONSTER_STD_HP; mob.max_hp = MONSTER_STD_HP;
             mob.dmg = MONSTER_STD_DMG; mob.range = MONSTER_STD_RANGE;
             mob.target_id = 0; mob.last_hit_by_time = 0;
             mob.last_attack_time = 0; mob.last_regen_time = 0;
+            mob.attack_counter = 0; mob.boss_state = JungleMonster::IDLE;
             jungle_mobs[mob.id] = mob;
             std_count++;
         }
     }
 }
 
-// [新增] 野怪逻辑更新
 void update_jungle() {
     long long now = get_current_ms();
     std::vector<int> dead_ids;
+
+    // 清理过期特效
+    for (auto it = active_effects.begin(); it != active_effects.end(); ) {
+        if (now >= it->end_time) it = active_effects.erase(it);
+        else ++it;
+    }
 
     for (auto& pair : jungle_mobs) {
         JungleMonster& m = pair.second;
         if (m.hp <= 0) { dead_ids.push_back(m.id); continue; }
 
-        // 1. 脱战判定
-        // 如果当前有仇恨目标，但距离上次挨打超过4秒，清除仇恨
-        if (m.target_id != 0) {
-            if (now - m.last_hit_by_time > MONSTER_AGGRO_TIMEOUT) {
-                m.target_id = 0; // 丢失仇恨
-                // 可以在这里加个回满血或者归位逻辑，目前先原地呆着
-            }
-        }
-
-        // 2. 回血逻辑
-        // 如果没有仇恨目标，且不满血，每秒恢复 3k
+        // 脱战回血 (使用宏: 5000 HP / sec)
         if (m.target_id == 0 && m.hp < m.max_hp) {
             if (now - m.last_regen_time >= 1000) {
                 m.hp += MONSTER_REGEN_TICK;
                 if (m.hp > m.max_hp) m.hp = m.max_hp;
                 m.last_regen_time = now;
+                m.attack_counter = 0;
+                m.boss_state = JungleMonster::IDLE;
             }
         }
+        // 脱战判定 (使用宏: 5000 ms)
+        if (m.target_id != 0 && now - m.last_hit_by_time > MONSTER_AGGRO_TIMEOUT) {
+            m.target_id = 0; m.attack_counter = 0; m.boss_state = JungleMonster::IDLE;
+        }
 
-        // 3. 攻击逻辑 (仅当有仇恨目标时)
         if (m.target_id != 0) {
-            // 校验目标有效性
-            int tx = 0, ty = 0;
-            bool valid = false;
-            Player* p = get_player_by_id(m.target_id);
-            if (p) { tx = p->x; ty = p->y; valid = true; }
-            else if (minions.count(m.target_id)) { 
-                // 暂时不让野怪打小兵，除非小兵先打野怪（这里简化，野怪只反击）
-                // 实际上小兵代码没写打野怪逻辑，所以野怪target基本只有玩家
+            // === 状态机逻辑 ===
+            if (m.boss_state == JungleMonster::CASTING_PREPARE) {
+                // 主宰蓄力 (1.5s)
+                if (m.type == BOSS_TYPE_OVERLORD) {
+                    if (now - m.skill_start_time >= OVERLORD_SKILL_DELAY) {
+                        for (auto& target_pos : m.skill_targets) {
+                            // 爆发喷泉特效 (深紫)
+                            SkillEffect eff = {target_pos.x, target_pos.y, VFX_OVERLORD_DMG, now, now + 500, OVERLORD_SKILL_RADIUS, m.id};
+                            active_effects.push_back(eff);
+                            
+                            // 伤害结算
+                            for (auto& p : players) {
+                                if (!p.second.is_playing) continue;
+                                if (dist_sq(p.second.x, p.second.y, target_pos.x, target_pos.y) <= OVERLORD_SKILL_RADIUS * OVERLORD_SKILL_RADIUS) {
+                                    p.second.hp -= (m.dmg * 3);
+                                    p.second.current_effect = EFFECT_HIT;
+                                    std::cout << "Overlord Skill Hit Player " << p.second.id << " Dmg: " << (m.dmg * 3) << std::endl;
+                                    if(p.second.hp <= 0) { 
+                                        p.second.hp = p.second.max_hp; p.second.x = (p.second.color == 1)?22:128; p.second.y = (p.second.color == 1)?128:22;
+                                        m.target_id = 0; m.attack_counter = 0; m.boss_state = JungleMonster::IDLE;
+                                    }
+                                }
+                            }
+                        }
+                        m.boss_state = JungleMonster::IDLE;
+                        m.last_attack_time = now; 
+                    }
+                }
+                continue; 
             }
-
-            if (!valid) {
-                m.target_id = 0; // 目标消失，脱战
-            } else {
-                int d = dist_sq(m.x, m.y, tx, ty);
-                if (d <= m.range * m.range) {
-                    if (now - m.last_attack_time >= MONSTER_ATK_COOLDOWN) {
+            else if (m.boss_state == JungleMonster::CASTING_ACTIVE) {
+                // 暴君持续施法
+                if (m.type == BOSS_TYPE_TYRANT) {
+                    if (now - m.skill_start_time >= TYRANT_SKILL_DUR) {
+                        m.boss_state = JungleMonster::IDLE;
                         m.last_attack_time = now;
-                        m.visual_end_time = now + 200;
-                        if (p) {
-                            p->hp -= m.dmg;
-                            p->current_effect = EFFECT_HIT;
+                    } else {
+                        if (now >= m.next_tick_time) {
+                            m.next_tick_time += 500;
+                            for (auto& p : players) {
+                                if (!p.second.is_playing) continue;
+                                int d = dist_sq(m.x, m.y, p.second.x, p.second.y);
+                                if (d <= TYRANT_RANGE * TYRANT_RANGE) {
+                                    p.second.hp -= (m.dmg * 2);
+                                    p.second.current_effect = EFFECT_HIT;
+                                    int push_dx = 0, push_dy = 0;
+                                    if (p.second.x > m.x) push_dx = 1; else if (p.second.x < m.x) push_dx = -1;
+                                    if (p.second.y > m.y) push_dy = 1; else if (p.second.y < m.y) push_dy = -1;
+                                    int nx = p.second.x + push_dx;
+                                    int ny = p.second.y + push_dy;
+                                    if (!is_blocked_by_tower(nx, ny)) { p.second.x = nx; p.second.y = ny; }
+                                    if(p.second.hp <= 0) {
+                                        p.second.hp = p.second.max_hp; p.second.x = (p.second.color == 1)?22:128; p.second.y = (p.second.color == 1)?128:22;
+                                        m.target_id = 0; m.attack_counter = 0; m.boss_state = JungleMonster::IDLE;
+                                    }
+                                }
+                            }
                         }
                     }
-                } else {
-                    // 距离过远，也脱战
-                    if (d > (m.range + 3) * (m.range + 3)) m.target_id = 0; 
                 }
+                continue; 
+            }
+
+            int tx=0, ty=0; bool valid=false;
+            Player* p = get_player_by_id(m.target_id);
+            if (p) { tx = p->x; ty = p->y; valid = true; }
+            if (!valid) { m.target_id = 0; continue; }
+
+            int d = dist_sq(m.x, m.y, tx, ty);
+            if (d <= m.range * m.range) {
+                int cd = (m.type == BOSS_TYPE_OVERLORD) ? OVERLORD_ATK_CD : 
+                         (m.type == BOSS_TYPE_TYRANT) ? TYRANT_ATK_CD : MONSTER_ATK_COOLDOWN;
+                
+                if (now - m.last_attack_time >= cd) {
+                    if ((m.type == BOSS_TYPE_OVERLORD || m.type == BOSS_TYPE_TYRANT) && m.attack_counter >= 3) {
+                        m.attack_counter = 0;
+                        
+                        if (m.type == BOSS_TYPE_OVERLORD) {
+                            m.boss_state = JungleMonster::CASTING_PREPARE;
+                            m.skill_start_time = now;
+                            m.skill_targets.clear();
+                            for(auto& pl : players) {
+                                if(pl.second.is_playing && dist_sq(m.x, m.y, pl.second.x, pl.second.y) <= OVERLORD_RANGE * OVERLORD_RANGE) {
+                                    m.skill_targets.push_back({pl.second.x, pl.second.y});
+                                    SkillEffect eff = {pl.second.x, pl.second.y, VFX_OVERLORD_WARN, now, now + OVERLORD_SKILL_DELAY, OVERLORD_SKILL_RADIUS, m.id};
+                                    active_effects.push_back(eff);
+                                }
+                            }
+                        } 
+                        else if (m.type == BOSS_TYPE_TYRANT) {
+                            m.boss_state = JungleMonster::CASTING_ACTIVE;
+                            m.skill_start_time = now;
+                            m.next_tick_time = now + 500;
+                        }
+                    } 
+                    else {
+                        m.last_attack_time = now;
+                        m.visual_end_time = now + 200;
+                        m.attack_counter++;
+                        if (p) { p->hp -= m.dmg; p->current_effect = EFFECT_HIT; }
+                    }
+                }
+            } else {
+                if (d > (m.range + 5) * (m.range + 5)) { m.target_id = 0; m.attack_counter = 0; }
             }
         }
     }
     
-    // 清理尸体
     for (int id : dead_ids) jungle_mobs.erase(id);
 }
 
@@ -486,11 +591,8 @@ bool handle_attack(int attacker_fd) {
         int d = dist_sq(att.x, att.y, t.second.x, t.second.y);
         if (d <= range_sq + 10 && d < min_dist) { min_dist = d; target_id = t.second.id; }
     }
-    
-    // [新增] 检测野怪
     for (auto& m : jungle_mobs) {
         int d = dist_sq(att.x, att.y, m.second.x, m.second.y);
-        // 野怪体积大，判断距离稍微放宽
         if (d <= range_sq + 5 && d < min_dist) { min_dist = d; target_id = m.second.id; }
     }
 
@@ -498,9 +600,7 @@ bool handle_attack(int attacker_fd) {
         att.current_target_id = target_id; 
         att.visual_end_time = get_current_ms() + 200; 
         hit = true;
-        
         long long now = get_current_ms();
-
         Player* p = get_player_by_id(target_id);
         if (p) {
             p->hp -= tmpl.attack_dmg; 
@@ -511,14 +611,11 @@ bool handle_attack(int attacker_fd) {
                 std::cout << "[Kill] Player " << p->id << " died." << std::endl;
             }
         } else if (target_id >= JUNGLE_ID_START) {
-            // [新增] 攻击野怪
             if (jungle_mobs.count(target_id)) {
                 JungleMonster& mob = jungle_mobs[target_id];
                 mob.hp -= tmpl.attack_dmg;
-                // 仇恨触发
                 mob.target_id = att.id;
-                mob.last_hit_by_time = now; // 刷新脱战计时
-                std::cout << "Monster " << mob.id << " hit, HP: " << mob.hp << std::endl;
+                mob.last_hit_by_time = now; 
             }
         } else if (target_id >= MINION_ID_START) {
             if (minions.count(target_id)) minions[target_id].hp -= tmpl.attack_dmg;
@@ -533,7 +630,6 @@ void broadcast_world() {
     long long now = get_current_ms();
     std::vector<GamePacket> updates;
     
-    // Player
     for (auto& sp : players) {
         if (!sp.second.is_playing) continue;
         Player& p = sp.second;
@@ -542,7 +638,6 @@ void broadcast_world() {
         GamePacket pkt = { TYPE_UPDATE, p.id, p.x, p.y, p.hero_id, 0, p.color, p.hp, p.max_hp, range, p.current_effect, atk_target };
         updates.push_back(pkt);
     }
-    // Tower
     for (auto& pair : towers) {
         Tower& t = pair.second;
         if (t.hp > 0) { 
@@ -551,22 +646,27 @@ void broadcast_world() {
             updates.push_back(pkt);
         }
     }
-    // Minion
     for (auto& pair : minions) {
         Minion& m = pair.second;
         int atk_target = (now < m.visual_end_time) ? m.target_id : 0;
         GamePacket pkt = { TYPE_UPDATE, m.id, (int)m.x, (int)m.y, m.type, 0, m.team, m.hp, m.max_hp, 0, 0, atk_target };
         updates.push_back(pkt);
     }
-    // [新增] Jungle
     for (auto& pair : jungle_mobs) {
         JungleMonster& m = pair.second;
         if (m.hp > 0) {
             int atk_target = (now < m.visual_end_time) ? m.target_id : 0;
-            // 使用 input 字段传输野怪类型 (STD/RED/BLUE)
             GamePacket pkt = { TYPE_UPDATE, m.id, m.x, m.y, m.type, 0, 0, m.hp, m.max_hp, 0, 0, atk_target };
+            if (m.type == BOSS_TYPE_TYRANT && m.boss_state == JungleMonster::CASTING_ACTIVE) {
+                GamePacket eff = { TYPE_EFFECT, 0, m.x, m.y, VFX_TYRANT_WAVE, 0, 0, 0, 0, TYRANT_RANGE, 0, 0 };
+                updates.push_back(eff);
+            }
             updates.push_back(pkt);
         }
+    }
+    for (const auto& ef : active_effects) {
+        GamePacket pkt = { TYPE_EFFECT, 0, ef.x, ef.y, ef.type, 0, 0, 0, 0, ef.radius, 0, 0 };
+        updates.push_back(pkt);
     }
 
     GamePacket end_pkt; memset(&end_pkt, 0, sizeof(end_pkt)); 
@@ -585,7 +685,7 @@ void broadcast_world() {
 int main() {
     MapGenerator::init(game_map);
     init_towers(); 
-    init_jungle(); // [新增]
+    init_jungle(); 
     game_start_time = get_current_ms();
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -661,11 +761,9 @@ int main() {
         }
 
         update_towers(); 
-        update_jungle(); // [新增]
+        update_jungle(); 
         if (!minions.empty()) { update_minions(); need_broadcast = true; }
-        // 野怪在不动的时候不需要每帧广播，但如果被打或者回血了需要广播
-        // 简化起见，只要野怪活着就广播，或者优化逻辑（这里先简单处理）
-        if(!jungle_mobs.empty()) need_broadcast = true;
+        if (!jungle_mobs.empty()) need_broadcast = true; 
 
         if (need_broadcast) broadcast_world();
     }
