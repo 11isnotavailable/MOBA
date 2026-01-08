@@ -1034,72 +1034,132 @@ void handle_inputs() {
 // 7. 主函数 (Main)
 // ==========================================
 
-int main() {
+int main(int argc, char* argv[]) {
+    // 初始化本地化设置，支持中文显示
     setlocale(LC_ALL, ""); 
+    
+    // 初始化地图数据
     MapGenerator::init(ctx.game_map); 
 
-    ctx.sock = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in s_addr = {AF_INET, htons(8888)};
-    inet_pton(AF_INET, "127.0.0.1", &s_addr.sin_addr);
-    int flag = 1; setsockopt(ctx.sock, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
-
-    if (connect(ctx.sock, (struct sockaddr*)&s_addr, sizeof(s_addr)) < 0) {
-        std::cerr << "Cannot connect to server!" << std::endl; return -1;
+    // === [修改开始] 支持命令行传入 IP ===
+    const char* server_ip = "127.0.0.1"; // 默认连接本地
+    if (argc > 1) {
+        server_ip = argv[1]; // 如果有参数，则使用参数作为IP
     }
     
-    ctx.state = STATE_LOGIN;
+    std::cout << "Connecting to server at " << server_ip << "..." << std::endl;
+    // === [修改结束] ===
 
-    initscr(); cbreak(); noecho(); curs_set(0); keypad(stdscr, TRUE);
-    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-    mouseinterval(0); printf("\033[?1003h\n"); 
-
-    if (has_colors()) {
-        start_color();
-        init_pair(1, COLOR_GREEN, COLOR_WHITE); bkgd(COLOR_PAIR(1)); 
-        init_pair(2, COLOR_RED, COLOR_WHITE); init_pair(3, COLOR_MAGENTA, COLOR_WHITE); 
-        init_pair(4, COLOR_BLUE, COLOR_WHITE); 
-        init_pair(5, COLOR_WHITE, COLOR_CYAN); init_pair(6, COLOR_MAGENTA, COLOR_WHITE);
-        init_pair(7, COLOR_WHITE, COLOR_RED); init_pair(8, COLOR_BLACK, COLOR_WHITE);
-        init_pair(9, COLOR_WHITE, COLOR_BLUE); init_pair(10, COLOR_WHITE, COLOR_BLUE);
-        init_pair(11, COLOR_BLACK, COLOR_WHITE); init_pair(12, COLOR_GREEN, COLOR_WHITE); 
-        init_pair(13, COLOR_RED, COLOR_WHITE); init_pair(14, COLOR_BLUE, COLOR_WHITE); 
-        init_pair(15, COLOR_WHITE, COLOR_BLACK); init_pair(16, COLOR_CYAN, COLOR_WHITE); 
-        init_pair(20, COLOR_YELLOW, COLOR_RED); init_pair(21, COLOR_RED, COLOR_WHITE); 
-        init_pair(30, COLOR_GREEN, COLOR_WHITE); init_pair(31, COLOR_CYAN, COLOR_WHITE);  
-        init_pair(32, COLOR_RED, COLOR_WHITE); init_pair(33, COLOR_GREEN, COLOR_CYAN); 
-        init_pair(34, COLOR_BLACK, COLOR_CYAN); init_pair(35, COLOR_RED, COLOR_CYAN);   
-        init_pair(36, COLOR_BLUE, COLOR_WHITE); 
-        init_pair(40, COLOR_MAGENTA, COLOR_BLACK); init_pair(41, COLOR_MAGENTA, COLOR_WHITE); 
+    // 创建 socket
+    ctx.sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (ctx.sock < 0) {
+        std::cerr << "Socket creation error" << std::endl;
+        return -1;
     }
 
+    sockaddr_in s_addr;
+    memset(&s_addr, 0, sizeof(s_addr));
+    s_addr.sin_family = AF_INET;
+    s_addr.sin_port = htons(8888);
+
+    // 将 IP 地址从字符串转换为二进制格式
+    if (inet_pton(AF_INET, server_ip, &s_addr.sin_addr) <= 0) {
+        std::cerr << "Invalid address/ Address not supported: " << server_ip << std::endl;
+        return -1;
+    }
+
+    // 禁用 Nagle 算法 (TCP_NODELAY) 以降低延迟
+    int flag = 1; 
+    setsockopt(ctx.sock, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
+
+    // 连接服务器
+    if (connect(ctx.sock, (struct sockaddr*)&s_addr, sizeof(s_addr)) < 0) {
+        std::cerr << "Cannot connect to server at " << server_ip << "!" << std::endl; 
+        return -1;
+    }
+    
+    // 初始状态设为登录界面
+    ctx.state = STATE_LOGIN;
+
+    // 初始化 ncurses 图形界面
+    initscr(); 
+    cbreak(); 
+    noecho(); 
+    curs_set(0); 
+    keypad(stdscr, TRUE);
+    
+    // 启用鼠标事件捕获
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+    mouseinterval(0); 
+    printf("\033[?1003h\n"); // 启用鼠标移动报告
+
+    // 初始化颜色对
+    if (has_colors()) {
+        start_color();
+        init_pair(1, COLOR_GREEN, COLOR_WHITE); 
+        bkgd(COLOR_PAIR(1)); // 设置默认背景色
+        
+        init_pair(2, COLOR_RED, COLOR_WHITE); 
+        init_pair(3, COLOR_MAGENTA, COLOR_WHITE); 
+        init_pair(4, COLOR_BLUE, COLOR_WHITE); 
+        init_pair(5, COLOR_WHITE, COLOR_CYAN); 
+        init_pair(6, COLOR_MAGENTA, COLOR_WHITE);
+        init_pair(7, COLOR_WHITE, COLOR_RED); 
+        init_pair(8, COLOR_BLACK, COLOR_WHITE);
+        init_pair(9, COLOR_WHITE, COLOR_BLUE); 
+        init_pair(10, COLOR_WHITE, COLOR_BLUE);
+        init_pair(11, COLOR_BLACK, COLOR_WHITE); 
+        init_pair(12, COLOR_GREEN, COLOR_WHITE); 
+        init_pair(13, COLOR_RED, COLOR_WHITE); 
+        init_pair(14, COLOR_BLUE, COLOR_WHITE); 
+        init_pair(15, COLOR_WHITE, COLOR_BLACK); 
+        init_pair(16, COLOR_CYAN, COLOR_WHITE); 
+        init_pair(20, COLOR_YELLOW, COLOR_RED); 
+        init_pair(21, COLOR_RED, COLOR_WHITE); 
+        init_pair(30, COLOR_GREEN, COLOR_WHITE); 
+        init_pair(31, COLOR_CYAN, COLOR_WHITE);  
+        init_pair(32, COLOR_RED, COLOR_WHITE); 
+        init_pair(33, COLOR_GREEN, COLOR_CYAN); 
+        init_pair(34, COLOR_BLACK, COLOR_CYAN); 
+        init_pair(35, COLOR_RED, COLOR_CYAN);   
+        init_pair(36, COLOR_BLUE, COLOR_WHITE); 
+        init_pair(40, COLOR_MAGENTA, COLOR_BLACK); 
+        init_pair(41, COLOR_MAGENTA, COLOR_WHITE); 
+    }
+
+    // 设置 getch 为非阻塞
     timeout(0); 
 
+    // 主循环
     while (true) {
-        process_network();
-        handle_inputs();
-        if (ctx.state == STATE_GAME) update_auto_move();
+        process_network(); // 处理网络消息
+        handle_inputs();   // 处理用户输入
+        
+        if (ctx.state == STATE_GAME) update_auto_move(); // 处理自动寻路移动
 
+        // 根据状态绘制界面
         if (ctx.state == STATE_LOGIN) draw_login();
         else if (ctx.state == STATE_LOBBY) draw_lobby();
         else if (ctx.state == STATE_ROOM) draw_room();
         else if (ctx.state == STATE_PICK) draw_pick_screen(); 
         else if (ctx.state == STATE_GAME) { draw_game_scene(); draw_game_ui(); }
-        // [新增] 胜负动画与结算
         else if (ctx.state == STATE_GAME_OVER_ANIM) {
+            // 胜负动画逻辑
             long long now = get_ms();
             long long diff = now - ctx.game_over_time;
             
             if (diff < 1000) {
-                // 停滞 1秒 (黑屏)
                 erase();
                 mvprintw(LINES/2, COLS/2 - 5, "GAME OVER...");
             } 
-            else if (diff < 3000) { // 1000 + 2000 ms
-                // 显示 Victory / Defeat
+            else if (diff < 3000) { 
                 erase();
                 bool i_win = false;
                 int my_team = 0;
-                for(int i=0; i<ctx.game_result.player_count; i++) if(strcmp(ctx.game_result.results[i].name, ctx.username.c_str())==0) my_team=ctx.game_result.results[i].team;
+                for(int i=0; i<ctx.game_result.player_count; i++) 
+                    if(strcmp(ctx.game_result.results[i].name, ctx.username.c_str())==0) 
+                        my_team=ctx.game_result.results[i].team;
+                
                 if(my_team == ctx.game_result.winner_team) i_win = true;
 
                 if (i_win) {
@@ -1121,7 +1181,12 @@ int main() {
         }
 
         refresh();
-        usleep(10000); 
+        usleep(10000); // 10ms 延迟，约 100 FPS
     }
-    printf("\033[?1003l\n"); endwin(); close(ctx.sock); return 0;
+    
+    // 清理工作
+    printf("\033[?1003l\n"); 
+    endwin(); 
+    close(ctx.sock); 
+    return 0;
 }
