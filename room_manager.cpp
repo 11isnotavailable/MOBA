@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <chrono> 
 
+// 获取当前毫秒时间戳
 static long long get_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -22,16 +23,15 @@ RoomManager::~RoomManager() {
 }
 
 void RoomManager::update_all() {
-    // 1. 驱动所有房间的游戏逻辑
-    // 同时清理空房间
+    // 1. 驱动所有房间的游戏逻辑，并清理空房间
     auto it = rooms.begin();
     while (it != rooms.end()) {
         GameRoom* room = it->second;
         
-        // 运行逻辑
+        // 运行房间内部逻辑
         room->update_logic();
         
-        // 检查是否为空 (没人了就销毁)
+        // 检查是否为空
         if (room->is_empty()) {
             std::cout << "[RoomMgr] Room " << it->first << " is empty, removing." << std::endl;
             delete room;
@@ -41,18 +41,18 @@ void RoomManager::update_all() {
         }
     }
 
-    // 2. 处理随机匹配队列
+    // 2. 处理匹配队列
     process_matching();
 }
 
 void RoomManager::on_player_disconnect(int fd) {
-    // 1. 如果在匹配队列，移除
+    // 1. 从匹配队列移除
     for (auto it = match_queue.begin(); it != match_queue.end(); ) {
         if (it->fd == fd) it = match_queue.erase(it);
         else ++it;
     }
 
-    // 2. 如果在房间里，移除
+    // 2. 从房间移除并清理映射
     if (player_room_map.count(fd)) {
         int rid = player_room_map[fd];
         if (rooms.count(rid)) {
@@ -62,13 +62,14 @@ void RoomManager::on_player_disconnect(int fd) {
     }
 }
 
-// === 包分发逻辑 ===
+// === 网络包分发逻辑 ===
 
 void RoomManager::handle_lobby_packet(int fd, int type, const void* data) {
     if (type == TYPE_CREATE_ROOM) {
         create_room(fd);
     }
     else if (type == TYPE_JOIN_ROOM) {
+        // 修正：直接转换指针读取完整的 RoomControlPacket
         const RoomControlPacket* pkt = (const RoomControlPacket*)data;
         join_room(fd, pkt->room_id);
     }
@@ -82,12 +83,10 @@ void RoomManager::handle_lobby_packet(int fd, int type, const void* data) {
         add_to_match(fd);
     }
     else if (type == TYPE_GAME_START) {
-        // 房主请求开始游戏 (进入选人阶段)
         if (player_room_map.count(fd)) {
             int rid = player_room_map[fd];
             if (rooms.count(rid)) {
-                // [修复] 这里只调用 start_game 切换状态
-                // 真正的 TYPE_GAME_START 会在 GameRoom::handle_game_packet 里的选人逻辑完成后发送
+                // 进入选人阶段
                 rooms[rid]->start_game(fd);
             }
         }
@@ -107,14 +106,13 @@ void RoomManager::handle_room_control(int fd, const RoomControlPacket& pkt) {
         room->set_ready(fd, pkt.extra_data == 1);
     }
     
-    // 广播最新状态给房间内所有人
+    // 广播房间最新状态
     RoomStatePacket state = room->get_room_state_packet();
     std::vector<int> mems = room->get_player_fds();
     for(int mfd : mems) write(mfd, &state, sizeof(state));
 }
 
 void RoomManager::handle_game_packet(int fd, const GamePacket& pkt) {
-    // 必须在房间里
     if (player_room_map.count(fd) == 0) return;
     int rid = player_room_map[fd];
     if (rooms.count(rid)) {
@@ -122,10 +120,13 @@ void RoomManager::handle_game_packet(int fd, const GamePacket& pkt) {
     }
 }
 
-// === 内部实现 ===
+// === 内部逻辑实现 ===
 
 void RoomManager::create_room(int fd) {
-    if (player_room_map.count(fd)) return; 
+    // 修正：创建前先离开可能存在的旧房间
+    if (player_room_map.count(fd)) {
+        leave_room(fd);
+    }
 
     std::string name = user_mgr->get_username(fd);
     int new_id = room_id_counter++;
@@ -143,8 +144,16 @@ void RoomManager::create_room(int fd) {
 }
 
 void RoomManager::join_room(int fd, int room_id) {
-    if (player_room_map.count(fd)) return; 
-    if (rooms.count(room_id) == 0) return; 
+    // 修正：加入前先清理旧房间状态，防止逻辑阻塞
+    if (player_room_map.count(fd)) {
+        std::cout << "[RoomMgr] Player already in room " << player_room_map[fd] << ", leaving first." << std::endl;
+        leave_room(fd); 
+    }
+
+    if (rooms.count(room_id) == 0) {
+        std::cout << "[RoomMgr] Join failed: Room " << room_id << " not found." << std::endl;
+        return; 
+    }
     
     GameRoom* room = rooms[room_id];
     std::string name = user_mgr->get_username(fd);
@@ -174,7 +183,6 @@ void RoomManager::leave_room(int fd) {
         }
     }
     player_room_map.erase(fd);
-    
     send_room_list(fd);
 }
 
@@ -225,12 +233,12 @@ void RoomManager::process_matching() {
             std::string name = user_mgr->get_username(fd);
             room->add_player(fd, name);
             player_room_map[fd] = new_id;
-            room->set_ready(fd, true); 
+            room->set_ready(fd, true);
         }
         
         match_queue.erase(match_queue.begin(), match_queue.begin() + 10);
         
-        // [修复] 自动进入选人阶段 (不直接开始游戏)
+        // 自动进入选人阶段
         room->start_game(owner_fd); 
         return;
     }
@@ -255,7 +263,7 @@ void RoomManager::process_matching() {
         }
         match_queue.clear();
         
-        // 广播让大家进房间
+        // 广播进入房间
         RoomStatePacket state = room->get_room_state_packet();
         std::vector<int> mems = room->get_player_fds();
         for(int mfd : mems) write(mfd, &state, sizeof(state));

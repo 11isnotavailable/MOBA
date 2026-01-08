@@ -74,19 +74,23 @@
 #define TYPE_JOIN_ROOM      23
 #define TYPE_LEAVE_ROOM     24
 #define TYPE_MATCH_REQ      25
-#define TYPE_ROOM_UPDATE    26 // 房间状态更新
-#define TYPE_GAME_START     27 // 正式开始游戏
+#define TYPE_ROOM_UPDATE    26 
+#define TYPE_GAME_START     27 
 
 // 游戏逻辑
 #define TYPE_MOVE           1
 #define TYPE_UPDATE         2  
-#define TYPE_SELECT         3  // 选人指令
+#define TYPE_SELECT         3  
 #define TYPE_FRAME          4  
 #define TYPE_ATTACK         5  
-#define TYPE_SPELL          6  
+#define TYPE_SPELL          6  // 通用回血技能 (K键)
 #define TYPE_EFFECT         7  
-#define TYPE_BUY_ITEM       30 // 购买物品
-#define TYPE_GAME_OVER      40 // [新增] 游戏结束结算
+#define TYPE_BUY_ITEM       30 
+#define TYPE_GAME_OVER      40 
+
+// [新增] 英雄专属技能
+#define TYPE_SKILL_U        50 // 法师连锁技能 / 其他英雄技能1
+#define TYPE_SKILL_I        51 // 法师闪现 / 其他英雄技能2
 
 // --- 返回码 ---
 #define RET_SUCCESS      0
@@ -101,6 +105,10 @@
 #define VFX_OVERLORD_WARN  10 // 浅紫圈 (预警)
 #define VFX_OVERLORD_DMG   11 // 喷泉爆发 (伤害)
 #define VFX_TYRANT_WAVE    12 // 暴君冲击波
+
+// [新增] 法师技能特效
+#define VFX_MAGE_S1        20 // 蓝色小喷泉 (Stage 1 & 2)
+#define VFX_MAGE_ULT       21 // 蓝色大海浪 (Stage 3)
 
 // ------------------------------------------
 // 结构体定义
@@ -119,12 +127,12 @@ struct LoginResponsePacket {
     int user_id;
 };
 
-// 2. 房间信息 (列表用)
+// 2. 房间信息
 struct RoomInfo {
     int room_id;
     int player_count;
     int max_player;
-    int status; // 0:Waiting, 1:Picking, 2:Playing
+    int status; 
     char owner_name[32];
 };
 
@@ -134,29 +142,29 @@ struct RoomListPacket {
     RoomInfo rooms[10]; 
 };
 
-// 3. 房间详细状态 (房间内/选人用)
+// 3. 房间详细状态
 struct RoomSlot {
     int is_taken;
     char name[32];
     int is_ready;
     int is_owner;
-    int team;     // 1 or 2
-    int hero_id;  // 0:未选, 1:Warrior, 2:Mage, 3:Tank
+    int team;     
+    int hero_id;  
 };
 
 struct RoomStatePacket {
-    int type;      // TYPE_ROOM_UPDATE
+    int type;      
     int room_id;
-    int status;    // 房间当前状态 (WAITING/PICKING/PLAYING)
+    int status;    
     RoomSlot slots[10];
 };
 
-// 4. 房间控制包 (加入/踢人/换位/准备)
+// 4. 房间控制包
 struct RoomControlPacket {
     int type;
     int room_id;
-    int slot_index; // -1 表示通用操作
-    int extra_data; // 如 ready状态
+    int slot_index; 
+    int extra_data; 
 };
 
 // 5. 游戏内数据包
@@ -173,26 +181,24 @@ struct GamePacket {
     int effect;            
     int attack_target_id;  
     int gold;       
-    
-    // 用于同步客户端展示
-    int items[6];     // 装备栏同步
-    int team1_score;  // 蓝方(Team1)击杀数
-    int team2_score;  // 红方(Team2)击杀数
+    int items[6];     
+    int team1_score;  
+    int team2_score;  
 };
 
-// [新增] 6. 游戏结算包
+// 6. 游戏结算包
 struct PlayerResult {
     char name[32];
-    int team;     // 1 or 2
+    int team;     
     int hero_id;
-    int kills;    // 击杀
-    int deaths;   // 死亡
+    int kills;    
+    int deaths;   
 };
 
 struct GameOverPacket {
-    int type;           // TYPE_GAME_OVER
-    int winner_team;    // 1: Blue Win, 2: Red Win
-    int duration_sec;   // 游戏时长
+    int type;           
+    int winner_team;    
+    int duration_sec;   
     int player_count;
     PlayerResult results[10];
 };
@@ -200,6 +206,10 @@ struct GameOverPacket {
 // ==========================================
 // [Part 3] 数值平衡配置
 // ==========================================
+
+// 技能冷却 (毫秒)
+#define CD_FLASH            10000 // 闪现 10秒 (为了测试方便，可以设短点)
+#define CD_MAGE_ULT         15000 // 法师大招 15秒
 
 // 野怪数值
 #define MONSTER_STD_HP        8000
@@ -237,7 +247,7 @@ struct GameOverPacket {
 #define TOWER_BASE_DMG_HERO   300     
 
 // 小兵速度调整
-#define MINION_MOVE_SPEED     0.02f    
+#define MINION_MOVE_SPEED     0.01f    
 
 #define MINION_ATK_COOLDOWN   2000    
 #define MINION_TYPE_MELEE     1       

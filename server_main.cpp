@@ -8,7 +8,7 @@
 #include <cstring>
 #include <chrono> 
 #include <map>
-#include <thread> // [新增] 多线程支持
+#include <thread> 
 
 #include "protocol.h"
 #include "user_manager.h"
@@ -36,37 +36,49 @@ int setNonBlocking(int sockfd) {
     return fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// [新增] 后台数据持久化线程函数
-// 每隔 30 秒将用户数据写入磁盘
+// 后台数据持久化线程函数
 void data_persistence_thread(UserManager* um) {
     while (true) {
-        // 休眠 30 秒
         std::this_thread::sleep_for(std::chrono::seconds(30));
-        
-        // 执行保存 (UserManager 内部已加锁，线程安全)
         um->save_db();
-        // std::cout << "[Background Thread] Auto-saved user data." << std::endl;
     }
 }
 
 int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1; setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (server_fd < 0) {
+        perror("socket failed");
+        return -1;
+    }
+
+    int opt = 1; 
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     
-    // [重要] 开启 TCP_NODELAY，这对实时移动至关重要
     int flag = 1;
     setsockopt(server_fd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
     
-    sockaddr_in address = {AF_INET, htons(PORT), INADDR_ANY};
-    bind(server_fd, (struct sockaddr*)&address, sizeof(address));
-    listen(server_fd, 3);
+    sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        perror("bind failed");
+        return -1;
+    }
+
+    if (listen(server_fd, 1024) < 0) {
+        perror("listen failed");
+        return -1;
+    }
 
     UserManager user_mgr;
     RoomManager room_mgr(&user_mgr);
 
-    // [新增] 启动后台线程
+    // 启动后台持久化线程
     std::thread bg_saver(data_persistence_thread, &user_mgr);
-    bg_saver.detach(); // 分离线程，让它独立运行
+    bg_saver.detach(); 
     std::cout << "[Server] Background persistence thread started." << std::endl;
 
     int epoll_fd = epoll_create1(0);
@@ -77,94 +89,105 @@ int main() {
 
     std::cout << "[Server] Listening on port " << PORT << "..." << std::endl;
 
-    // [新增] 游戏循环时间控制
-    const int TICK_MS = 33; // 目标帧率 30FPS (约33ms一帧)
+    const int TICK_MS = 33; // 约30FPS
     long long last_tick_time = get_current_ms();
 
     while (true) {
-        // 1. 计算 epoll 应该等待多久
         long long now = get_current_ms();
         long long elapsed = now - last_tick_time;
         int wait_ms = TICK_MS - (int)elapsed;
+        if (wait_ms < 0) wait_ms = 0; 
         
-        if (wait_ms < 0) wait_ms = 0; // 如果逻辑处理超时，立即进入下一帧
-        
-        // 2. 等待网络事件 (用剩余时间 wait，而不是死板的 usleep)
         int n = epoll_wait(epoll_fd, events, MAX_EVENTS, wait_ms);
 
-        // 3. 处理网络 IO
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == server_fd) {
-                sockaddr_in client_addr; socklen_t len = sizeof(client_addr);
+                sockaddr_in client_addr; 
+                socklen_t len = sizeof(client_addr);
                 int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &len);
-                setNonBlocking(client_fd);
-                ev.events = EPOLLIN | EPOLLET; 
-                ev.data.fd = client_fd;
-                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
-                client_buffers[client_fd] = {0, 0};
-                std::cout << "[Server] New connection: " << client_fd << std::endl;
+                if (client_fd >= 0) {
+                    setNonBlocking(client_fd);
+                    ev.events = EPOLLIN | EPOLLET; 
+                    ev.data.fd = client_fd;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+                    client_buffers[client_fd] = {{0}, 0};
+                    std::cout << "[Server] New connection: " << client_fd << std::endl;
+                }
             } else {
                 int fd = events[i].data.fd;
-                char buf[1024];
-                int len = read(fd, buf, sizeof(buf));
+                char recv_buf[2048];
+                int n_read = read(fd, recv_buf, sizeof(recv_buf));
                 
-                if (len <= 0) {
-                    // 断开连接
-                    if (len < 0 && errno == EAGAIN) continue;
+                if (n_read <= 0) {
+                    if (n_read < 0 && errno == EAGAIN) continue;
+                    std::cout << "[Server] Client disconnected: " << fd << std::endl;
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
                     close(fd);
                     client_buffers.erase(fd);
-                    
                     room_mgr.on_player_disconnect(fd);
                     user_mgr.logout_user(fd);
                 } else {
-                    // 处理粘包
                     ClientBuffer& buf_obj = client_buffers[fd];
-                    if (buf_obj.len + len > 10240) { len = 10240 - buf_obj.len; } // 防止溢出
-                    memcpy(buf_obj.data + buf_obj.len, buf, len);
-                    buf_obj.len += len;
+                    if (buf_obj.len + n_read > 10240) { 
+                        // 简单处理缓冲区溢出
+                        buf_obj.len = 0; 
+                    } 
+                    memcpy(buf_obj.data + buf_obj.len, recv_buf, n_read);
+                    buf_obj.len += n_read;
 
                     int ptr = 0;
-                    while (ptr < buf_obj.len) {
-                        if (buf_obj.len - ptr < 4) break; 
+                    while (buf_obj.len - ptr >= 4) {
                         int type = *(int*)(buf_obj.data + ptr);
-                        
                         size_t pkt_len = 0;
+
+                        // 根据类型判定包长度
                         if (type == TYPE_LOGIN_REQ || type == TYPE_REG_REQ) pkt_len = sizeof(LoginPacket);
                         else if (type == TYPE_ROOM_LIST_REQ || type == TYPE_MATCH_REQ || 
                                  type == TYPE_CREATE_ROOM || type == TYPE_LEAVE_ROOM || type == TYPE_GAME_START) pkt_len = sizeof(int);
-                        else if (type == TYPE_JOIN_ROOM || type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomControlPacket); // JOIN复用结构
+                        else if (type == TYPE_JOIN_ROOM || type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomControlPacket);
                         else if (type == TYPE_MOVE || type == TYPE_ATTACK || type == TYPE_SPELL || 
-                                 type == TYPE_SELECT || type == TYPE_BUY_ITEM) pkt_len = sizeof(GamePacket);
+                                 type == TYPE_SELECT || type == TYPE_BUY_ITEM || 
+                                 type == TYPE_SKILL_U || type == TYPE_SKILL_I) pkt_len = sizeof(GamePacket);
 
-                        if (pkt_len == 0) { ptr = buf_obj.len; break; } // Error
-                        if (buf_obj.len - ptr < pkt_len) break; // Incomplete
+                        // 长度非法或数据不足，跳出循环等待后续数据
+                        if (pkt_len == 0) { 
+                            buf_obj.len = 0; // 发生未知错误，重置缓冲区
+                            break; 
+                        } 
+                        if (buf_obj.len - ptr < (int)pkt_len) break; 
 
                         void* pdata = buf_obj.data + ptr;
 
-                        // 分发逻辑
+                        // 分发处理
                         if (type == TYPE_LOGIN_REQ || type == TYPE_REG_REQ) {
                             LoginPacket* pkt = (LoginPacket*)pdata;
-                            LoginResponsePacket resp; resp.type = (type==TYPE_LOGIN_REQ?TYPE_LOGIN_RESP:TYPE_REG_RESP);
+                            LoginResponsePacket resp; 
+                            memset(&resp, 0, sizeof(resp));
+                            resp.type = (type == TYPE_LOGIN_REQ ? TYPE_LOGIN_RESP : TYPE_REG_RESP);
                             int ret = (type == TYPE_REG_REQ) ? user_mgr.register_user(pkt->username, pkt->password) : user_mgr.login_user(fd, pkt->username, pkt->password);
-                            resp.result = ret; resp.user_id = fd; 
+                            resp.result = ret; 
+                            resp.user_id = fd; 
                             write(fd, &resp, sizeof(resp));
                         }
                         else if (type >= 20 && type <= 29) {
+                            // 大厅与房间控制 (TYPE_JOIN_ROOM 会在这里被处理)
                             if (type == TYPE_ROOM_UPDATE) {
-                                room_mgr.handle_room_control(fd, *(RoomControlPacket*)pdata); // Ready/Switch
+                                room_mgr.handle_room_control(fd, *(RoomControlPacket*)pdata); 
                             }
                             else {
+                                // 修正点：直接传递 pdata，RoomManager 内部会按照 RoomControlPacket 解析
                                 room_mgr.handle_lobby_packet(fd, type, pdata);
                             }
                         }
                         else {
+                            // 游戏内逻辑
                             room_mgr.handle_game_packet(fd, *(GamePacket*)pdata);
                         }
 
                         ptr += pkt_len;
                     }
 
+                    // 移动剩余数据
                     if (ptr > 0) {
                         if (ptr < buf_obj.len) memmove(buf_obj.data, buf_obj.data + ptr, buf_obj.len - ptr);
                         buf_obj.len -= ptr;
@@ -173,13 +196,10 @@ int main() {
             }
         }
 
-        // 4. 检查是否需要执行游戏逻辑 Tick
+        // 逻辑帧更新
         now = get_current_ms();
         if (now - last_tick_time >= TICK_MS) {
-            // 执行所有房间的逻辑更新
             room_mgr.update_all();
-            
-            // 重置时间 (简单的追赶策略)
             last_tick_time = now;
         }
     }

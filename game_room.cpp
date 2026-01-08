@@ -139,6 +139,7 @@ void GameRoom::start_battle() {
     team2_kills = 0;
 
     init_map_and_units(); 
+    hero_spells.clear(); // 清空遗留技能
     
     for(auto& pair : players) {
         PlayerState& p = pair.second;
@@ -169,6 +170,13 @@ void GameRoom::start_battle() {
         p.hp = p.max_hp;
         p.x = (p.color == 1) ? 22 : 128;
         p.y = (p.color == 1) ? 128 : 22;
+        
+        // [新增] 初始化朝向与技能CD
+        p.dir_x = 0; 
+        p.dir_y = 1; // 默认向下
+        p.last_skill_u_time = 0;
+        p.last_skill_i_time = 0;
+
         p.last_aggressive_time = 0;
         p.visual_end_time = 0;
     }
@@ -340,10 +348,19 @@ void GameRoom::handle_game_packet(int fd, const GamePacket& pkt) {
 
     // === 阶段2：战斗 ===
     if (status == ROOM_STATUS_PLAYING && p.is_playing) { 
+        long long now = get_current_ms();
+
         if (pkt.type == TYPE_MOVE) {
             int dx = pkt.x; int dy = pkt.y;
             if (dx < -1) dx = -1; if (dx > 1) dx = 1;
             if (dy < -1) dy = -1; if (dy > 1) dy = 1;
+            
+            // [新增] 更新玩家朝向
+            if (dx != 0 || dy != 0) {
+                p.dir_x = dx;
+                p.dir_y = dy;
+            }
+
             int nx = p.x + dx; int ny = p.y + dy;
             if (!is_blocked_by_tower(nx, ny)) { 
                 p.x = nx; p.y = ny; 
@@ -353,11 +370,58 @@ void GameRoom::handle_game_packet(int fd, const GamePacket& pkt) {
             handle_attack_logic(fd);
         }
         else if (pkt.type == TYPE_SPELL) {
+            // 通用回血
             p.hp += 100; 
             if(p.hp > p.max_hp) p.hp = p.max_hp;
         }
         else if (pkt.type == TYPE_BUY_ITEM) {
             handle_buy_item(fd, pkt.input);
+        }
+        // [新增] 闪现技能 (Key: I)
+        else if (pkt.type == TYPE_SKILL_I) {
+            if (now - p.last_skill_i_time >= CD_FLASH) {
+                int dist = 3;
+                int nx = p.x + p.dir_x * dist;
+                int ny = p.y + p.dir_y * dist;
+
+                // 检查是否撞墙或出界
+                if (is_valid_move(nx, ny)) {
+                    // 成功闪现
+                    p.x = nx; p.y = ny;
+                    std::cout << "[Skill] Player " << p.name << " used Flash." << std::endl;
+                } else {
+                    // 撞墙，闪现失败，位置不变，但CD照扣 (模拟操作失误)
+                    std::cout << "[Skill] Player " << p.name << " Flash hit wall!" << std::endl;
+                }
+                p.last_skill_i_time = now;
+            }
+        }
+        // [新增] 连锁水柱技能 (Key: U)
+        else if (pkt.type == TYPE_SKILL_U) {
+            // 这里为了演示，所有英雄都能放，如果你想限制法师：if (p.hero_id == HERO_MAGE) ...
+            if (now - p.last_skill_u_time >= CD_MAGE_ULT) {
+                // 生成第一段技能
+                SpellObj s;
+                s.id = global_id_counter++;
+                s.owner_id = p.id;
+                s.stage = 1;
+                // 向前2格
+                s.x = p.x + p.dir_x * 2;
+                s.y = p.y + p.dir_y * 2;
+                s.dir_x = p.dir_x; s.dir_y = p.dir_y; // 记录方向传递给下一段
+                s.radius = 2;
+                s.dmg_mult = 1.0f;
+                s.create_time = now;
+                s.active_time = now + 1000;      // 1秒后爆发伤害
+                s.next_stage_time = now + 500;   // 0.5秒后生成下一段
+                s.end_time = now + 1200;         // 稍微留一点视觉时间
+                s.next_spawned = false;
+                s.dmg_dealt = false;
+                
+                hero_spells.push_back(s);
+                p.last_skill_u_time = now;
+                std::cout << "[Skill] Player " << p.name << " used Chain Water (Stage 1)." << std::endl;
+            }
         }
     }
 }
@@ -391,16 +455,17 @@ void GameRoom::update_logic() {
     update_towers(now);
     update_minions(now);
     update_jungle(now);
+    
+    // [新增] 更新技能逻辑
+    update_spells(now);
+
     broadcast_world(now);
 
-    // [新增] 检查基地是否被推（游戏结束判定）
+    // 检查基地是否被推（游戏结束判定）
     bool team1_base_alive = false;
     bool team2_base_alive = false;
 
-    // 遍历所有塔，检查基地存活情况 (HP > 0)
     for(auto& pair : towers) {
-        // [关键修复]：不要使用 max_hp == 10000 判断，因为普通塔也是 10000
-        // 必须使用 game_map 的地块类型判断是否为 TILE_BASE
         if (game_map[pair.second.y][pair.second.x] == TILE_BASE && pair.second.hp > 0) {
             if (pair.second.team == 1) team1_base_alive = true;
             if (pair.second.team == 2) team2_base_alive = true;
@@ -439,6 +504,142 @@ void GameRoom::update_logic() {
         // 结束游戏状态，重置为等待
         status = ROOM_STATUS_WAITING; 
         std::cout << "[Room " << room_id << "] GAME OVER. Winner: Team " << winner << std::endl;
+    }
+}
+
+// [新增] 技能逻辑更新：处理生成下一段、伤害判定、移除
+void GameRoom::update_spells(long long now) {
+    std::vector<SpellObj> next_spells; // 用于暂存新生成的技能段
+    std::vector<int> remove_indices;
+
+    for (size_t i = 0; i < hero_spells.size(); i++) {
+        SpellObj& s = hero_spells[i];
+        
+        // 1. 生成下一段的逻辑
+        if (s.next_stage_time != -1 && now >= s.next_stage_time && !s.next_spawned) {
+            SpellObj next;
+            next.id = global_id_counter++;
+            next.owner_id = s.owner_id;
+            next.dir_x = s.dir_x; next.dir_y = s.dir_y;
+            
+            if (s.stage == 1) {
+                // 阶段1 -> 阶段2: 往前5格，半径4
+                next.stage = 2;
+                next.x = s.x + s.dir_x * 5;
+                next.y = s.y + s.dir_y * 5;
+                next.radius = 4;
+                next.dmg_mult = 1.0f;
+                next.create_time = now;
+                next.active_time = now + 1000; // 同样是1秒预警
+                next.next_stage_time = now + 500;
+                next.end_time = now + 1200;
+                next.next_spawned = false;
+                next.dmg_dealt = false;
+                next_spells.push_back(next);
+            } 
+            else if (s.stage == 2) {
+                // 阶段2 -> 阶段3: 往前6格，半径6，持续伤害
+                next.stage = 3;
+                next.x = s.x + s.dir_x * 6;
+                next.y = s.y + s.dir_y * 6;
+                next.radius = 6;
+                next.dmg_mult = 2.0f;
+                next.create_time = now;
+                next.active_time = now; // 立即开始 (或者加一点延迟)
+                next.next_stage_time = -1; // 没有下一段了
+                next.end_time = now + 3000; // 持续3秒
+                next.last_dot_time = 0;
+                next.next_spawned = false;
+                next_spells.push_back(next);
+            }
+            s.next_spawned = true;
+        }
+
+        // 2. 伤害判定逻辑
+        bool should_deal_dmg = false;
+        
+        if (s.stage == 1 || s.stage == 2) {
+            // 爆发伤害
+            if (now >= s.active_time && !s.dmg_dealt) {
+                should_deal_dmg = true;
+                s.dmg_dealt = true;
+            }
+        } else if (s.stage == 3) {
+            // 持续伤害 (每0.6秒)
+            if (now >= s.active_time && now < s.end_time) {
+                if (now - s.last_dot_time >= 600) {
+                    should_deal_dmg = true;
+                    s.last_dot_time = now;
+                }
+            }
+        }
+
+        if (should_deal_dmg) {
+            // 获取施法者攻击力
+            PlayerState* owner = get_player_by_id(s.owner_id);
+            int base_atk = 0;
+            int owner_team = 0;
+            if (owner) {
+                base_atk = get_total_atk(*owner);
+                owner_team = owner->color;
+            } else {
+                base_atk = 500; // 默认值，防崩溃
+            }
+
+            int dmg = (int)(base_atk * s.dmg_mult);
+            int r_sq = s.radius * s.radius;
+
+            // 对英雄造成伤害
+            for (auto& p : players) {
+                if (!p.second.is_playing || p.second.color == owner_team) continue;
+                if (dist_sq(s.x, s.y, p.second.x, p.second.y) <= r_sq) {
+                    int def = get_total_def(p.second);
+                    int final = dmg - def; 
+                    if (final < 1) final = 1;
+                    
+                    p.second.hp -= final;
+                    p.second.current_effect = EFFECT_HIT;
+                    
+                    if (p.second.hp <= 0) {
+                        p.second.deaths++;
+                        if (owner) owner->kills++;
+                        if (p.second.color == 1) team2_kills++; else team1_kills++;
+                        if (owner) add_gold(owner->id, 300);
+                        p.second.hp = p.second.max_hp;
+                        p.second.x = (p.second.color == 1) ? 22 : 128; p.second.y = (p.second.color == 1) ? 128 : 22;
+                    }
+                }
+            }
+            // 对小兵造成伤害
+            for (auto& m : minions) {
+                if (m.second.team == owner_team) continue;
+                if (dist_sq(s.x, s.y, (int)m.second.x, (int)m.second.y) <= r_sq) {
+                    m.second.hp -= dmg;
+                    if (m.second.hp <= 0 && owner) add_gold(owner->id, 80); 
+                }
+            }
+            // 对野怪
+            for (auto& j : jungle_mobs) {
+                if (dist_sq(s.x, s.y, j.second.x, j.second.y) <= r_sq) {
+                    j.second.hp -= dmg;
+                    if (j.second.hp <= 0 && owner) add_gold(owner->id, 150);
+                }
+            }
+        }
+
+        // 3. 过期移除
+        if (now >= s.end_time) {
+            remove_indices.push_back(i);
+        }
+    }
+
+    // 处理新增和移除
+    // 先加新的
+    for (auto& ns : next_spells) hero_spells.push_back(ns);
+    
+    // 再移除旧的 (倒序移除以防索引错乱)
+    for (int k = remove_indices.size() - 1; k >= 0; k--) {
+        hero_spells.erase(hero_spells.begin() + remove_indices[k]);
     }
 }
 
@@ -1129,12 +1330,42 @@ void GameRoom::broadcast_world(long long now) {
         }
         updates.push_back(pkt);
     }
-    // Pack Effects
+    // Pack Effects (Boss & Hero Skills)
     for(auto& ef : active_effects) {
         if(now < ef.end_time) {
             GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
             pkt.type = TYPE_EFFECT; pkt.x = ef.x; pkt.y = ef.y;
             pkt.input = ef.type; pkt.attack_range = ef.radius;
+            updates.push_back(pkt);
+        }
+    }
+    
+    // [新增] 将英雄技能转换为特效包发送给客户端
+    for(auto& s : hero_spells) {
+        if (s.stage == 1 || s.stage == 2) {
+            // 前两段：未触发伤害前显示预警圈
+            if (now < s.active_time) {
+                GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
+                pkt.type = TYPE_EFFECT; pkt.x = s.x; pkt.y = s.y;
+                pkt.input = VFX_MAGE_S1; // 蓝色小圈
+                pkt.attack_range = s.radius;
+                updates.push_back(pkt);
+            }
+            // 触发伤害瞬间的爆发特效 (可选)
+            else if (now < s.end_time) {
+                // 可以复用同一个 ID，或者加一个爆发 ID
+                GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
+                pkt.type = TYPE_EFFECT; pkt.x = s.x; pkt.y = s.y;
+                pkt.input = VFX_MAGE_S1; 
+                pkt.attack_range = s.radius;
+                updates.push_back(pkt);
+            }
+        } else if (s.stage == 3) {
+            // 第三段：持续显示
+            GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
+            pkt.type = TYPE_EFFECT; pkt.x = s.x; pkt.y = s.y;
+            pkt.input = VFX_MAGE_ULT; // 蓝色大招
+            pkt.attack_range = s.radius;
             updates.push_back(pkt);
         }
     }

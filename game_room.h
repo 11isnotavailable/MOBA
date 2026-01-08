@@ -10,10 +10,36 @@
 // --------------------------------------------------------
 // 辅助结构体
 // --------------------------------------------------------
+
+// [新增] 技能实体结构体 (用于管理法师的多段技能等)
+struct SpellObj {
+    int id;               // 唯一ID (暂用 global counter 分配)
+    int owner_id;         // 释放者 ID
+    int stage;            // 阶段: 1, 2, 3
+    int x, y;             // 中心坐标
+    int dir_x, dir_y;     // 传递给下一段的方向
+    int radius;           // 伤害半径
+    float dmg_mult;       // 伤害倍率 (1.0 或 2.0)
+    
+    long long create_time;        // 创建时间
+    long long active_time;        // 激活/开始造成伤害的时间 (用于Stage1,2的延迟爆发)
+    long long next_stage_time;    // 什么时候生成下一段 (-1表示没有)
+    long long end_time;           // 技能彻底消失时间
+    
+    // 状态标记
+    bool next_spawned;    // 下一段是否已生成
+    bool dmg_dealt;       // 单次伤害是否已结算 (Stage 1 & 2)
+    long long last_dot_time; // 持续伤害上次触发时间 (Stage 3)
+};
+
 struct PlayerState {
     int fd;
     int id; // 运行时实体ID
     int x, y;
+    
+    // [新增] 玩家朝向 (用于技能施放方向)
+    int dir_x, dir_y; 
+
     int hp, max_hp;
     int hero_id;
     int color; // 1:上方, 2:下方
@@ -34,9 +60,13 @@ struct PlayerState {
     std::vector<int> inventory;         // 物品ID列表
     long long last_regen_passive_time;  // 霸者之装回血计时器
 
-    // [新增] 个人战绩
+    // 个人战绩
     int kills;
     int deaths;
+
+    // [新增] 技能冷却
+    long long last_skill_u_time;
+    long long last_skill_i_time;
 };
 
 struct TowerObj {
@@ -143,7 +173,12 @@ private:
     std::map<int, MinionObj> minions;
     std::map<int, TowerObj> towers; 
     std::map<int, JungleObj> jungle_mobs; 
+    
+    // 视觉特效 (Boss等使用)
     std::vector<SkillEffectObj> active_effects; 
+
+    // [新增] 英雄逻辑技能 (法师大招等需要持续判定的技能)
+    std::vector<SpellObj> hero_spells;
 
     // === 内部辅助逻辑 ===
     void init_map_and_units(); 
@@ -151,6 +186,9 @@ private:
     void update_towers(long long now);
     void update_minions(long long now);
     void update_jungle(long long now);
+    // [新增] 更新英雄技能逻辑
+    void update_spells(long long now);
+
     bool handle_attack_logic(int attacker_fd);
     void broadcast_world(long long now);
 

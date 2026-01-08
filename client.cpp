@@ -25,8 +25,8 @@ enum AppState {
     STATE_ROOM,
     STATE_PICK, // 选人阶段
     STATE_GAME,
-    STATE_GAME_OVER_ANIM, // [新增] 游戏结束动画
-    STATE_SETTLEMENT      // [新增] 结算页面
+    STATE_GAME_OVER_ANIM, // 游戏结束动画
+    STATE_SETTLEMENT      // 结算页面
 };
 
 struct AppContext {
@@ -79,7 +79,7 @@ struct AppContext {
     int stuck_frames;
     long long last_auto_move_time;
 
-    // [新增] 结算相关
+    // 结算相关
     GameOverPacket game_result;
     long long game_over_time;
 };
@@ -330,13 +330,26 @@ void draw_skill_box(int y, int x, char key, const char* name, int color) {
     attron(COLOR_PAIR(color)); mvprintw(y, x, "┌───┐"); mvprintw(y+1, x, "│ %c │", key); mvprintw(y+2, x, "└───┘"); attroff(COLOR_PAIR(color)); mvprintw(y+3, x, " %s", name);
 }
 
-void draw_effect_fountain(int cx, int cy) {
+// [修改] 增加 is_blue 参数，区分主宰喷泉(紫)和法师水柱(蓝)
+void draw_effect_fountain(int cx, int cy, bool is_blue) {
     int ui_offset = UI_TOP_H;
     struct Col { int dx; int h; int color; };
+    
+    int c1, c2, c3;
+    if (is_blue) {
+        c1 = COLOR_PAIR(14) | A_REVERSE | A_BOLD; // 亮蓝
+        c2 = COLOR_PAIR(36) | A_BOLD;             // 蓝
+        c3 = COLOR_PAIR(16) | A_BOLD;             // 青/浅蓝
+    } else {
+        c1 = COLOR_PAIR(41) | A_REVERSE | A_BOLD; // 紫白
+        c2 = COLOR_PAIR(35) | A_BOLD;             // 红青
+        c3 = COLOR_PAIR(40) | A_BOLD;             // 紫黑
+    }
+
     std::vector<Col> cols = {
-        {0, 4, COLOR_PAIR(41) | A_REVERSE | A_BOLD}, 
-        {-1, 2, COLOR_PAIR(35) | A_BOLD}, {1, 2, COLOR_PAIR(35) | A_BOLD},
-        {-2, 1, COLOR_PAIR(40) | A_BOLD}, {2, 1, COLOR_PAIR(40) | A_BOLD}
+        {0, 4, c1}, 
+        {-1, 2, c2}, {1, 2, c2},
+        {-2, 1, c3}, {2, 1, c3}
     };
 
     for (const auto& c : cols) {
@@ -385,21 +398,49 @@ void draw_hero_visual(int wx, int wy, int hid, int cid, bool me, int eff) {
     attroff(attr);
 }
 void draw_effect_floor(int cx, int cy, int range, int type) {
+    // 喷泉类特效 (立体绘制)
     if (type == VFX_OVERLORD_DMG) {
-        draw_effect_fountain(cx, cy);
+        draw_effect_fountain(cx, cy, false); // 紫色
+        return;
+    }
+    if (type == VFX_MAGE_S1) {
+        draw_effect_fountain(cx, cy, true); // 蓝色
         return;
     }
 
-    int r = range; int color = (type==VFX_OVERLORD_WARN || type==VFX_TYRANT_WAVE) ? 40 : 0;
-    int wave_r = -1; if (type == VFX_TYRANT_WAVE) wave_r = (get_ms() / 150) % (range + 1); 
+    // 地面圆环类特效
+    int r = range; 
+    int color = 0;
+    
+    // 颜色选择
+    if (type == VFX_OVERLORD_WARN || type == VFX_TYRANT_WAVE) color = 40; // 紫/红
+    else if (type == VFX_MAGE_ULT) color = 36; // 蓝色
+
+    int wave_r = -1; 
+    if (type == VFX_TYRANT_WAVE || type == VFX_MAGE_ULT) {
+        // 波纹扩散动画
+        wave_r = (get_ms() / 150) % (range + 1); 
+    }
+
     for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++) {
         if (dx*dx + dy*dy <= r*r) {
             int wx = cx + dx, wy = cy + dy; int sx = wx - ctx.cam_x, sy = wy - ctx.cam_y;
             if (sx < 0 || sx >= ctx.view_w || sy < 0 || sy >= ctx.view_h) continue;
-            attron(COLOR_PAIR(color)); char c = '.'; 
-            if (type == VFX_TYRANT_WAVE && abs((int)sqrt(dx*dx + dy*dy) - wave_r) < 1) { attron(A_BOLD | A_REVERSE); c = 'O'; }
+            
+            attron(COLOR_PAIR(color)); 
+            char c = '.'; 
+            
+            // 波纹高亮逻辑
+            if ((type == VFX_TYRANT_WAVE || type == VFX_MAGE_ULT) && abs((int)sqrt(dx*dx + dy*dy) - wave_r) < 1) { 
+                attron(A_BOLD | A_REVERSE); 
+                c = 'O'; 
+            }
+            
             mvprintw(sy + UI_TOP_H, sx * 2, "%c ", c);
-            if (type == VFX_TYRANT_WAVE && abs((int)sqrt(dx*dx + dy*dy) - wave_r) < 1) attroff(A_BOLD | A_REVERSE);
+            
+            if ((type == VFX_TYRANT_WAVE || type == VFX_MAGE_ULT) && abs((int)sqrt(dx*dx + dy*dy) - wave_r) < 1) { 
+                attroff(A_BOLD | A_REVERSE); 
+            }
             attroff(COLOR_PAIR(color));
         }
     }
@@ -439,7 +480,7 @@ void draw_game_scene() {
         else if (t >= 11 && t <= 23) { attron(COLOR_PAIR(16)); if((wx+wy)%9==0) mvprintw(dy + UI_TOP_H, dx * 2, "."); attroff(COLOR_PAIR(16)); }
         else { attron(COLOR_PAIR(16)); if((wx+wy) % 9 == 0) mvprintw(dy + UI_TOP_H, dx * 2, "·"); attroff(COLOR_PAIR(16)); }
     }
-    // Layer 2: 特效
+    // Layer 2: 特效 (包含新的法师技能)
     for (const auto& eff : ctx.effects_state) draw_effect_floor(eff.x, eff.y, eff.attack_range, eff.input); 
     
     // Layer 3: UI辅助 (移动标记)
@@ -655,8 +696,8 @@ void draw_game_ui() {
     
     draw_skill_box(sk_y, sk_start_x,      'J', "ATK", 15); 
     draw_skill_box(sk_y, sk_start_x + 8,  'K', "HEAL", 14);
-    draw_skill_box(sk_y, sk_start_x + 16, 'U', "SK1", 14); 
-    draw_skill_box(sk_y, sk_start_x + 24, 'I', "SK2", 14);
+    draw_skill_box(sk_y, sk_start_x + 16, 'U', "ULT", 36);  // U键 蓝色
+    draw_skill_box(sk_y, sk_start_x + 24, 'I', "FLASH", 14); // I键
     
     // 商店按钮
     attron(COLOR_PAIR(20) | A_BOLD);
@@ -677,7 +718,7 @@ void draw_game_ui() {
     draw_shop();
 }
 
-// [新增] 绘制结算页面
+// 绘制结算页面
 void draw_settlement() {
     erase();
     int cx = COLS / 2;
@@ -782,9 +823,9 @@ void process_network() {
         if (type == TYPE_LOGIN_RESP || type == TYPE_REG_RESP) pkt_len = sizeof(LoginResponsePacket);
         else if (type == TYPE_ROOM_LIST_RESP) pkt_len = sizeof(RoomListPacket);
         else if (type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomStatePacket);
-        else if (type == TYPE_GAME_START || type == TYPE_FRAME || type == TYPE_UPDATE || type == TYPE_EFFECT) pkt_len = sizeof(GamePacket);
-        else if (type == TYPE_GAME_OVER) pkt_len = sizeof(GameOverPacket); // [新增]
-        else if (type >= 10 && type <= 30) pkt_len = sizeof(int); 
+        else if (type == TYPE_GAME_START || type == TYPE_FRAME || type == TYPE_UPDATE || type == TYPE_EFFECT || type == TYPE_SKILL_U || type == TYPE_SKILL_I) pkt_len = sizeof(GamePacket);
+        else if (type == TYPE_GAME_OVER) pkt_len = sizeof(GameOverPacket);
+        else if (type >= 10 && type <= 51) pkt_len = sizeof(int); 
         
         if (pkt_len == 0) { ptr = buf_len; break; } 
         if (buf_len - ptr < pkt_len) break; 
@@ -873,7 +914,7 @@ void process_network() {
                 }
             }
             else if (type == TYPE_EFFECT) { ctx.pending_effects_state.push_back(*pkt); }
-            else if (type == TYPE_GAME_OVER) { // [新增] 游戏结束处理
+            else if (type == TYPE_GAME_OVER) { 
                 GameOverPacket* gp = (GameOverPacket*)pdata;
                 ctx.game_result = *gp;
                 ctx.state = STATE_GAME_OVER_ANIM;
@@ -920,58 +961,127 @@ void update_auto_move() {
 void handle_inputs() {
     int ch = getch();
     if (ch == ERR) return;
-    if (ch == 27) { } // ESC
+    if (ch == 27) { } // ESC (暂不做处理)
 
+    // ==========================================
+    // 1. 登录界面输入
+    // ==========================================
     if (ctx.state == STATE_LOGIN) {
-        if (ch == '\t') ctx.input_focus = (ctx.input_focus + 1) % 4;
+        if (ch == '\t') {
+            ctx.input_focus = (ctx.input_focus + 1) % 4;
+        }
         else if (ch == KEY_BACKSPACE || ch == 127) {
             char* buf = (ctx.input_focus == 0) ? ctx.input_user : (ctx.input_focus == 1 ? ctx.input_pass : nullptr);
             if (buf && strlen(buf) > 0) buf[strlen(buf)-1] = '\0';
-        } else if (ch == '\n') {
+        } 
+        else if (ch == '\n') {
             if (ctx.input_focus >= 2) {
                 LoginPacket pkt; memset(&pkt, 0, sizeof(pkt));
                 pkt.type = (ctx.input_focus == 2) ? TYPE_LOGIN_REQ : TYPE_REG_REQ;
-                strncpy(pkt.username, ctx.input_user, 31); strncpy(pkt.password, ctx.input_pass, 31);
+                strncpy(pkt.username, ctx.input_user, 31); 
+                strncpy(pkt.password, ctx.input_pass, 31);
                 write(ctx.sock, &pkt, sizeof(pkt));
             }
-        } else if (ch >= 32 && ch <= 126) {
+        } 
+        else if (ch >= 32 && ch <= 126) {
             char* buf = (ctx.input_focus == 0) ? ctx.input_user : (ctx.input_focus == 1 ? ctx.input_pass : nullptr);
-            if (buf && strlen(buf) < 15) { buf[strlen(buf)] = (char)ch; buf[strlen(buf)+1] = '\0'; }
+            if (buf && strlen(buf) < 15) { 
+                buf[strlen(buf)] = (char)ch; 
+                buf[strlen(buf)+1] = '\0'; 
+            }
         }
     } 
+    // ==========================================
+    // 2. 大厅界面输入
+    // ==========================================
     else if (ctx.state == STATE_LOBBY && !ctx.is_matching) {
-        if (ch == 'c' || ch == 'C') { int t = TYPE_CREATE_ROOM; write(ctx.sock, &t, sizeof(t)); }
-        else if (ch == 'j' || ch == 'J') { 
-            echo(); curs_set(1); mvprintw(LINES-2, 2, "Enter Room ID: "); char buf[16]; getnstr(buf, 10); noecho(); curs_set(0);
-            RoomControlPacket pkt = { TYPE_JOIN_ROOM, atoi(buf), 0, 0 }; write(ctx.sock, &pkt, sizeof(pkt));
+        if (ch == 'c' || ch == 'C') { 
+            int t = TYPE_CREATE_ROOM; 
+            write(ctx.sock, &t, sizeof(t)); 
         }
-        else if (ch == 'm' || ch == 'M') { int t = TYPE_MATCH_REQ; write(ctx.sock, &t, sizeof(t)); ctx.is_matching = true; }
-        else if (ch == 'r' || ch == 'R') { int t = TYPE_ROOM_LIST_REQ; write(ctx.sock, &t, sizeof(t)); }
+        else if (ch == 'j' || ch == 'J') { 
+            // [修复] 切换为阻塞模式等待用户输入
+            timeout(-1); 
+            
+            echo(); 
+            curs_set(1); 
+            mvprintw(LINES-2, 2, "Enter Room ID: "); 
+            
+            char buf[16] = {0}; 
+            getnstr(buf, 10); // 现在这里会暂停等待用户输入了
+            
+            noecho(); 
+            curs_set(0);
+            
+            // [修复] 恢复非阻塞模式
+            timeout(0); 
+
+            // 只有输入有效数字才发送请求
+            if (strlen(buf) > 0) {
+                RoomControlPacket pkt = { TYPE_JOIN_ROOM, atoi(buf), 0, 0 }; 
+                write(ctx.sock, &pkt, sizeof(pkt));
+            }
+        }
+        else if (ch == 'm' || ch == 'M') { 
+            int t = TYPE_MATCH_REQ; 
+            write(ctx.sock, &t, sizeof(t)); 
+            ctx.is_matching = true; 
+        }
+        else if (ch == 'r' || ch == 'R') { 
+            int t = TYPE_ROOM_LIST_REQ; 
+            write(ctx.sock, &t, sizeof(t)); 
+        }
     } 
+    // ==========================================
+    // 3. 房间内输入
+    // ==========================================
     else if (ctx.state == STATE_ROOM) {
         bool owner = (ctx.my_slot_idx >= 0 && ctx.current_room.slots[ctx.my_slot_idx].is_owner);
-        if (ch == 'q' || ch == 'Q') { int t = TYPE_LEAVE_ROOM; write(ctx.sock, &t, sizeof(t)); ctx.state = STATE_LOBBY; int r = TYPE_ROOM_LIST_REQ; write(ctx.sock, &r, sizeof(r)); }
-        else if (ch == 'r' || ch == 'R') { if(!owner) { RoomControlPacket pkt = { TYPE_ROOM_UPDATE, ctx.current_room.room_id, -1, !ctx.current_room.slots[ctx.my_slot_idx].is_ready }; write(ctx.sock, &pkt, sizeof(pkt)); } }
+        
+        if (ch == 'q' || ch == 'Q') { 
+            int t = TYPE_LEAVE_ROOM; 
+            write(ctx.sock, &t, sizeof(t)); 
+            ctx.state = STATE_LOBBY; 
+            int r = TYPE_ROOM_LIST_REQ; 
+            write(ctx.sock, &r, sizeof(r)); 
+        }
+        else if (ch == 'r' || ch == 'R') { 
+            if(!owner) { 
+                RoomControlPacket pkt = { TYPE_ROOM_UPDATE, ctx.current_room.room_id, -1, !ctx.current_room.slots[ctx.my_slot_idx].is_ready }; 
+                write(ctx.sock, &pkt, sizeof(pkt)); 
+            } 
+        }
         else if (ch == '\n' && owner) { 
-            int t = TYPE_GAME_START; write(ctx.sock, &t, sizeof(t)); 
+            int t = TYPE_GAME_START; 
+            write(ctx.sock, &t, sizeof(t)); 
         }
         else if (ch == KEY_MOUSE) {
-            MEVENT e; if (getmouse(&e) == OK && (e.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED))) {
+            MEVENT e; 
+            if (getmouse(&e) == OK && (e.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED))) {
                 for (int i=0; i<10; i++) {
-                    int x = (COLS/2) - 30 + (i%5) * 14; int y = (i<5) ? 6 : 13;
-                    if (e.y >= y && e.y <= y+3 && e.x >= x && e.x <= x+12) { RoomControlPacket pkt = { TYPE_ROOM_UPDATE, ctx.current_room.room_id, i, 0 }; write(ctx.sock, &pkt, sizeof(pkt)); }
+                    int x = (COLS/2) - 30 + (i%5) * 14; 
+                    int y = (i<5) ? 6 : 13;
+                    if (e.y >= y && e.y <= y+3 && e.x >= x && e.x <= x+12) { 
+                        RoomControlPacket pkt = { TYPE_ROOM_UPDATE, ctx.current_room.room_id, i, 0 }; 
+                        write(ctx.sock, &pkt, sizeof(pkt)); 
+                    }
                 }
             }
         }
     } 
+    // ==========================================
+    // 4. 选人界面输入
+    // ==========================================
     else if (ctx.state == STATE_PICK) {
         if (ctx.my_slot_idx >= 0 && ctx.current_room.slots[ctx.my_slot_idx].hero_id != 0) return;
 
         if (ch == KEY_UP || ch == 'w') {
-            ctx.pick_cursor--; if(ctx.pick_cursor < 0) ctx.pick_cursor = 2;
+            ctx.pick_cursor--; 
+            if(ctx.pick_cursor < 0) ctx.pick_cursor = 2;
         } 
         else if (ch == KEY_DOWN || ch == 's') {
-            ctx.pick_cursor++; if(ctx.pick_cursor > 2) ctx.pick_cursor = 0;
+            ctx.pick_cursor++; 
+            if(ctx.pick_cursor > 2) ctx.pick_cursor = 0;
         }
         else if (ch == '\n') {
             int hid = ctx.pick_cursor + 1; // 1,2,3
@@ -981,6 +1091,9 @@ void handle_inputs() {
             write(ctx.sock, &pkt, sizeof(pkt));
         }
     }
+    // ==========================================
+    // 5. 游戏战斗中输入
+    // ==========================================
     else if (ctx.state == STATE_GAME) {
         // 商店开关
         if (ch == 'b' || ch == 'B') {
@@ -1004,25 +1117,53 @@ void handle_inputs() {
             }
         }
 
+        // 移动与技能
         if (ch == 'w' || ch == 's' || ch == 'a' || ch == 'd') {
             ctx.is_auto_moving = false;
-            int dx=0, dy=0; if(ch=='w') dy=-1; if(ch=='s') dy=1; if(ch=='a') dx=-1; if(ch=='d') dx=1;
-            GamePacket mv = {TYPE_MOVE, 0, dx, dy}; write(ctx.sock, &mv, sizeof(mv));
-        } else if (ch == 'j' || ch == 'J') { GamePacket att = {TYPE_ATTACK}; write(ctx.sock, &att, sizeof(att)); }
-        else if (ch == 'k' || ch == 'K') { GamePacket spl = {TYPE_SPELL}; write(ctx.sock, &spl, sizeof(spl)); }
+            int dx=0, dy=0; 
+            if(ch=='w') dy=-1; if(ch=='s') dy=1; if(ch=='a') dx=-1; if(ch=='d') dx=1;
+            GamePacket mv = {TYPE_MOVE, 0, dx, dy}; 
+            write(ctx.sock, &mv, sizeof(mv));
+        } 
+        else if (ch == 'j' || ch == 'J') { 
+            GamePacket att = {TYPE_ATTACK}; 
+            write(ctx.sock, &att, sizeof(att)); 
+        }
+        else if (ch == 'k' || ch == 'K') { 
+            GamePacket spl = {TYPE_SPELL}; 
+            write(ctx.sock, &spl, sizeof(spl)); 
+        }
+        else if (ch == 'u' || ch == 'U') { 
+            GamePacket pkt; memset(&pkt, 0, sizeof(pkt)); 
+            pkt.type = TYPE_SKILL_U; 
+            write(ctx.sock, &pkt, sizeof(pkt)); 
+        }
+        else if (ch == 'i' || ch == 'I') { 
+            GamePacket pkt; memset(&pkt, 0, sizeof(pkt)); 
+            pkt.type = TYPE_SKILL_I; 
+            write(ctx.sock, &pkt, sizeof(pkt)); 
+        }
         else if (ch == KEY_MOUSE) {
-            MEVENT e; if (getmouse(&e) == OK && (e.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED))) {
-                int sx = e.x / 2; int sy = e.y - UI_TOP_H;
+            MEVENT e; 
+            if (getmouse(&e) == OK && (e.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED))) {
+                int sx = e.x / 2; 
+                int sy = e.y - UI_TOP_H;
                 if (sx>=0 && sx<ctx.view_w && sy>=0 && sy<ctx.view_h) {
-                    ctx.target_dest_x = sx + ctx.cam_x; ctx.target_dest_y = sy + ctx.cam_y;
-                    ctx.is_auto_moving = true; ctx.stuck_frames = 0; add_log("[CMD] Moving...");
+                    ctx.target_dest_x = sx + ctx.cam_x; 
+                    ctx.target_dest_y = sy + ctx.cam_y;
+                    ctx.is_auto_moving = true; 
+                    ctx.stuck_frames = 0; 
+                    add_log("[CMD] Moving...");
                 }
             }
         }
     }
+    // ==========================================
+    // 6. 结算界面输入
+    // ==========================================
     else if (ctx.state == STATE_SETTLEMENT) {
         if (ch == '\n') {
-            // [新增] 结算页面回车回大厅
+            // 结算页面回车回大厅
             int t = TYPE_ROOM_LIST_REQ;
             write(ctx.sock, &t, sizeof(t));
             ctx.state = STATE_LOBBY;
@@ -1035,22 +1176,17 @@ void handle_inputs() {
 // ==========================================
 
 int main(int argc, char* argv[]) {
-    // 初始化本地化设置，支持中文显示
     setlocale(LC_ALL, ""); 
-    
-    // 初始化地图数据
     MapGenerator::init(ctx.game_map); 
 
-    // === [修改开始] 支持命令行传入 IP ===
-    const char* server_ip = "127.0.0.1"; // 默认连接本地
+    // === 支持命令行传入 IP ===
+    const char* server_ip = "127.0.0.1"; 
     if (argc > 1) {
-        server_ip = argv[1]; // 如果有参数，则使用参数作为IP
+        server_ip = argv[1]; 
     }
     
     std::cout << "Connecting to server at " << server_ip << "..." << std::endl;
-    // === [修改结束] ===
 
-    // 创建 socket
     ctx.sock = socket(AF_INET, SOCK_STREAM, 0);
     if (ctx.sock < 0) {
         std::cerr << "Socket creation error" << std::endl;
@@ -1062,42 +1198,35 @@ int main(int argc, char* argv[]) {
     s_addr.sin_family = AF_INET;
     s_addr.sin_port = htons(8888);
 
-    // 将 IP 地址从字符串转换为二进制格式
     if (inet_pton(AF_INET, server_ip, &s_addr.sin_addr) <= 0) {
         std::cerr << "Invalid address/ Address not supported: " << server_ip << std::endl;
         return -1;
     }
 
-    // 禁用 Nagle 算法 (TCP_NODELAY) 以降低延迟
     int flag = 1; 
     setsockopt(ctx.sock, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
 
-    // 连接服务器
     if (connect(ctx.sock, (struct sockaddr*)&s_addr, sizeof(s_addr)) < 0) {
         std::cerr << "Cannot connect to server at " << server_ip << "!" << std::endl; 
         return -1;
     }
     
-    // 初始状态设为登录界面
     ctx.state = STATE_LOGIN;
 
-    // 初始化 ncurses 图形界面
     initscr(); 
     cbreak(); 
     noecho(); 
     curs_set(0); 
     keypad(stdscr, TRUE);
     
-    // 启用鼠标事件捕获
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
     mouseinterval(0); 
-    printf("\033[?1003h\n"); // 启用鼠标移动报告
+    printf("\033[?1003h\n"); 
 
-    // 初始化颜色对
     if (has_colors()) {
         start_color();
         init_pair(1, COLOR_GREEN, COLOR_WHITE); 
-        bkgd(COLOR_PAIR(1)); // 设置默认背景色
+        bkgd(COLOR_PAIR(1)); 
         
         init_pair(2, COLOR_RED, COLOR_WHITE); 
         init_pair(3, COLOR_MAGENTA, COLOR_WHITE); 
@@ -1127,24 +1256,20 @@ int main(int argc, char* argv[]) {
         init_pair(41, COLOR_MAGENTA, COLOR_WHITE); 
     }
 
-    // 设置 getch 为非阻塞
     timeout(0); 
 
-    // 主循环
     while (true) {
-        process_network(); // 处理网络消息
-        handle_inputs();   // 处理用户输入
+        process_network(); 
+        handle_inputs();   
         
-        if (ctx.state == STATE_GAME) update_auto_move(); // 处理自动寻路移动
+        if (ctx.state == STATE_GAME) update_auto_move(); 
 
-        // 根据状态绘制界面
         if (ctx.state == STATE_LOGIN) draw_login();
         else if (ctx.state == STATE_LOBBY) draw_lobby();
         else if (ctx.state == STATE_ROOM) draw_room();
         else if (ctx.state == STATE_PICK) draw_pick_screen(); 
         else if (ctx.state == STATE_GAME) { draw_game_scene(); draw_game_ui(); }
         else if (ctx.state == STATE_GAME_OVER_ANIM) {
-            // 胜负动画逻辑
             long long now = get_ms();
             long long diff = now - ctx.game_over_time;
             
@@ -1181,10 +1306,9 @@ int main(int argc, char* argv[]) {
         }
 
         refresh();
-        usleep(10000); // 10ms 延迟，约 100 FPS
+        usleep(10000); 
     }
     
-    // 清理工作
     printf("\033[?1003l\n"); 
     endwin(); 
     close(ctx.sock); 
