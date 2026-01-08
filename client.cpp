@@ -23,7 +23,7 @@ enum AppState {
     STATE_LOGIN,
     STATE_LOBBY,
     STATE_ROOM,
-    STATE_PICK, // [新增] 选人阶段
+    STATE_PICK, // 选人阶段
     STATE_GAME
 };
 
@@ -42,7 +42,7 @@ struct AppContext {
     RoomStatePacket current_room; 
     int my_slot_idx; 
 
-    // Hero Selection [新增]
+    // Hero Selection
     int pick_cursor; // 0:Warrior, 1:Mage, 2:Tank
 
     // Game Data
@@ -57,6 +57,10 @@ struct AppContext {
     GamePacket my_hero_status;
     bool has_hero_data;
     
+    // [新增] 经济系统状态
+    int my_gold;
+    bool show_shop;
+
     int cam_x, cam_y;
     int view_w, view_h;
     
@@ -189,7 +193,6 @@ void draw_room() {
     else mvprintw(by, 30, "[R] Toggle Ready");
 }
 
-// [新增] 英雄选择界面
 void draw_pick_screen() {
     erase();
     int cx = COLS / 2;
@@ -224,24 +227,25 @@ void draw_pick_screen() {
     const char* role = (ctx.pick_cursor==0?"Fighter":(ctx.pick_cursor==1?"Caster":"Defender"));
     int hp = (ctx.pick_cursor==0?2000:(ctx.pick_cursor==1?1500:3000));
     int dmg = (ctx.pick_cursor==0?500:(ctx.pick_cursor==1?600:300));
+    int def = (ctx.pick_cursor==0?80:(ctx.pick_cursor==1?50:120));
     
     mvprintw(start_y, mid_x,   "Name: %s", name);
     mvprintw(start_y+1, mid_x, "Role: %s", role);
     mvprintw(start_y+2, mid_x, "HP:   %d", hp);
     mvprintw(start_y+3, mid_x, "DMG:  %d", dmg);
+    mvprintw(start_y+4, mid_x, "DEF:  %d", def);
     
     // 简易ASCII头像
-    mvprintw(start_y+5, mid_x, "Visual:");
-    if(ctx.pick_cursor==0) { mvprintw(start_y+6, mid_x, "  O  "); mvprintw(start_y+7, mid_x, " /|\\ "); mvprintw(start_y+8, mid_x, " / \\ "); }
-    if(ctx.pick_cursor==1) { mvprintw(start_y+6, mid_x, "  * "); mvprintw(start_y+7, mid_x, " /|\\~"); mvprintw(start_y+8, mid_x, " / \\ "); }
-    if(ctx.pick_cursor==2) { mvprintw(start_y+6, mid_x, " [=] "); mvprintw(start_y+7, mid_x, " ||| "); mvprintw(start_y+8, mid_x, " ||| "); }
+    mvprintw(start_y+6, mid_x, "Visual:");
+    if(ctx.pick_cursor==0) { mvprintw(start_y+7, mid_x, "  O  "); mvprintw(start_y+8, mid_x, " /|\\ "); mvprintw(start_y+9, mid_x, " / \\ "); }
+    if(ctx.pick_cursor==1) { mvprintw(start_y+7, mid_x, "  * "); mvprintw(start_y+8, mid_x, " /|\\~"); mvprintw(start_y+9, mid_x, " / \\ "); }
+    if(ctx.pick_cursor==2) { mvprintw(start_y+7, mid_x, " [=] "); mvprintw(start_y+8, mid_x, " ||| "); mvprintw(start_y+9, mid_x, " ||| "); }
     attroff(COLOR_PAIR(14));
 
     // --- 右侧：队友状态 ---
     int right_x = cx + 25;
     mvprintw(start_y - 2, right_x, "--- Team Pick ---");
     
-    // 确定我的队伍范围
     int start_slot = (ctx.my_slot_idx < 5) ? 0 : 5;
     
     for (int i = 0; i < 5; i++) {
@@ -255,7 +259,6 @@ void draw_pick_screen() {
             printw("%-8s", slot.name);
             attroff(A_BOLD);
             
-            // 显示已选英雄
             if (slot.hero_id == 0) {
                 attron(A_DIM); printw(" ..."); attroff(A_DIM);
             } else {
@@ -494,13 +497,67 @@ void draw_game_scene() {
     }
 }
 
+// [新增] 绘制商店
+void draw_shop() {
+    if (!ctx.show_shop) return;
+    
+    int w = 60, h = 18;
+    int x = (COLS - w) / 2;
+    int y = (LINES - h) / 2;
+    
+    // 画背景框
+    attron(COLOR_PAIR(15)); // 白底黑字
+    for(int i=0; i<h; i++) mvhline(y+i, x, ' ', w);
+    
+    // 标题与金币
+    mvprintw(y+1, x+20, "=== 装备商店 ===");
+    mvprintw(y+2, x+2, "当前金币: %d", ctx.my_gold);
+    mvhline(y+3, x, ACS_HLINE, w);
+
+    // 普通装备
+    mvprintw(y+5, x+2, "[1] 布甲 ($500)");
+    mvprintw(y+6, x+6, "防御 +50, 生命 +500");
+    
+    mvprintw(y+8, x+2, "[2] 铁剑 ($500)");
+    mvprintw(y+9, x+6, "攻击 +100");
+
+    // 特殊装备
+    mvprintw(y+11, x+2, "[3] 泣血之刃 ($2000)");
+    mvprintw(y+12, x+6, "攻击 +300, 吸血 20%%");
+
+    mvprintw(y+13, x+2, "[4] 霸者重装 ($2000)");
+    mvprintw(y+14, x+6, "生命+2000, 防御+200, 回血++");
+
+    mvprintw(y+15, x+2, "[5] 破军 ($2000)");
+    mvprintw(y+16, x+6, "攻击 +500");
+    
+    mvprintw(y+17, x+20, "按 B 键关闭商店");
+
+    attroff(COLOR_PAIR(15));
+    
+    // 简单边框
+    attron(COLOR_PAIR(15));
+    mvhline(y, x, ACS_HLINE, w);
+    mvhline(y+h-1, x, ACS_HLINE, w);
+    mvvline(y, x, ACS_VLINE, h);
+    mvvline(y, x+w-1, ACS_VLINE, h);
+    mvaddch(y, x, ACS_ULCORNER); mvaddch(y, x+w-1, ACS_URCORNER);
+    mvaddch(y+h-1, x, ACS_LLCORNER); mvaddch(y+h-1, x+w-1, ACS_LRCORNER);
+    attroff(COLOR_PAIR(15));
+}
+
 void draw_game_ui() {
     int W = COLS; int bottom_y = LINES - UI_BOT_H;
     
     // 顶部状态条
     attron(COLOR_PAIR(10)); mvhline(0, 0, ' ', W); 
     int m = ctx.game_time / 60; int s = ctx.game_time % 60;
-    attron(COLOR_PAIR(10) | A_BOLD); mvprintw(0, 2, "Time: %02d:%02d   User: %s", m, s, ctx.username.c_str()); attroff(COLOR_PAIR(10) | A_BOLD);
+    
+    // [修改] 顶部显示金币
+    attron(COLOR_PAIR(10) | A_BOLD); 
+    mvprintw(0, 2, "Time: %02d:%02d   User: %s   GOLD: %d", m, s, ctx.username.c_str(), ctx.my_gold); 
+    attroff(COLOR_PAIR(10) | A_BOLD);
+    
     mvprintw(0, W - 15, "[Q] QUIT"); attroff(COLOR_PAIR(10));
     
     // 底部背景线
@@ -527,10 +584,18 @@ void draw_game_ui() {
     draw_skill_box(sy, cx, 'J', "ATK", 15); draw_skill_box(sy, cx+8, 'K', "HEAL", 14);
     draw_skill_box(sy, cx+16, 'U', "SK1", 14); draw_skill_box(sy, cx+24, 'I', "SK2", 14);
     
+    // [新增] 商店提示
+    attron(COLOR_PAIR(20) | A_BOLD);
+    mvprintw(bottom_y + 1, cx + 35, "[B] SHOP");
+    attroff(COLOR_PAIR(20) | A_BOLD);
+
     // 战斗日志 (右侧)
     int log_x = W - 35;
     attron(COLOR_PAIR(11)); mvprintw(bottom_y, log_x, "COMBAT LOG"); attroff(COLOR_PAIR(11));
     for(size_t i=0; i<ctx.logs.size(); i++) mvprintw(bottom_y + 1 + i, log_x, "> %s", ctx.logs[i].c_str());
+
+    // 最后绘制商店图层，保证覆盖在最上层
+    draw_shop();
 }
 
 // ==========================================
@@ -553,7 +618,7 @@ void process_network() {
         else if (type == TYPE_ROOM_LIST_RESP) pkt_len = sizeof(RoomListPacket);
         else if (type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomStatePacket);
         else if (type == TYPE_GAME_START || type == TYPE_FRAME || type == TYPE_UPDATE || type == TYPE_EFFECT) pkt_len = sizeof(GamePacket);
-        else if (type >= 10 && type <= 29) pkt_len = sizeof(int); // 简单的整数包
+        else if (type >= 10 && type <= 30) pkt_len = sizeof(int); 
         
         if (pkt_len == 0) { ptr = buf_len; break; } 
         if (buf_len - ptr < pkt_len) break; 
@@ -593,6 +658,7 @@ void process_network() {
             else if (type == TYPE_GAME_START) {
                 ctx.state = STATE_GAME; MapGenerator::init(ctx.game_map); 
                 GamePacket* gp = (GamePacket*)pdata; ctx.my_id = gp->id; update_camera(0,0); 
+                ctx.my_gold = 0; ctx.show_shop = false; // 重置金币和商店
             }
             else if (type == TYPE_ROOM_LIST_RESP) {
                 ctx.state = STATE_LOBBY; RoomListPacket* l = (RoomListPacket*)pdata; 
@@ -614,7 +680,6 @@ void process_network() {
                     if (p.id == ctx.my_id) { 
                         ctx.my_hero_status = p; ctx.has_hero_data = true; 
                         
-                        // 检测瞬移 (复活/传送)，如果距离过大，强制打断自动寻路
                         int dist_sq = (p.x - old_x)*(p.x - old_x) + (p.y - old_y)*(p.y - old_y);
                         if (dist_sq > 200) { 
                             ctx.is_auto_moving = false;
@@ -627,7 +692,13 @@ void process_network() {
                 }
                 ctx.pending_world_state.clear(); ctx.pending_effects_state.clear();
             }
-            else if (type == TYPE_UPDATE) { ctx.pending_world_state.push_back(*pkt); }
+            else if (type == TYPE_UPDATE) { 
+                ctx.pending_world_state.push_back(*pkt); 
+                // [新增] 同步金币
+                if (pkt->id == ctx.my_id) {
+                    ctx.my_gold = pkt->gold;
+                }
+            }
             else if (type == TYPE_EFFECT) { ctx.pending_effects_state.push_back(*pkt); }
         }
         ptr += pkt_len;
@@ -700,7 +771,6 @@ void handle_inputs() {
         if (ch == 'q' || ch == 'Q') { int t = TYPE_LEAVE_ROOM; write(ctx.sock, &t, sizeof(t)); ctx.state = STATE_LOBBY; int r = TYPE_ROOM_LIST_REQ; write(ctx.sock, &r, sizeof(r)); }
         else if (ch == 'r' || ch == 'R') { if(!owner) { RoomControlPacket pkt = { TYPE_ROOM_UPDATE, ctx.current_room.room_id, -1, !ctx.current_room.slots[ctx.my_slot_idx].is_ready }; write(ctx.sock, &pkt, sizeof(pkt)); } }
         else if (ch == '\n' && owner) { 
-            // 房主开始游戏 -> 实际上是通知服务器切换到 Pick 状态
             int t = TYPE_GAME_START; write(ctx.sock, &t, sizeof(t)); 
         }
         else if (ch == KEY_MOUSE) {
@@ -712,9 +782,7 @@ void handle_inputs() {
             }
         }
     } 
-    // [新增] 选人阶段输入处理
     else if (ctx.state == STATE_PICK) {
-        // 如果已经选定，禁止操作
         if (ctx.my_slot_idx >= 0 && ctx.current_room.slots[ctx.my_slot_idx].hero_id != 0) return;
 
         if (ch == KEY_UP || ch == 'w') {
@@ -724,7 +792,6 @@ void handle_inputs() {
             ctx.pick_cursor++; if(ctx.pick_cursor > 2) ctx.pick_cursor = 0;
         }
         else if (ch == '\n') {
-            // 发送选择
             int hid = ctx.pick_cursor + 1; // 1,2,3
             GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
             pkt.type = TYPE_SELECT; 
@@ -733,6 +800,29 @@ void handle_inputs() {
         }
     }
     else if (ctx.state == STATE_GAME) {
+        // [新增] 商店开关
+        if (ch == 'b' || ch == 'B') {
+            ctx.show_shop = !ctx.show_shop;
+        }
+        
+        // [新增] 商店购买逻辑
+        if (ctx.show_shop) {
+            int buy_id = 0;
+            if (ch == '1') buy_id = 1;
+            else if (ch == '2') buy_id = 2;
+            else if (ch == '3') buy_id = 3;
+            else if (ch == '4') buy_id = 4;
+            else if (ch == '5') buy_id = 5;
+            
+            if (buy_id > 0) {
+                GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
+                pkt.type = TYPE_BUY_ITEM;
+                pkt.input = buy_id;
+                write(ctx.sock, &pkt, sizeof(pkt));
+            }
+            // 如果在商店界面，可以选择是否屏蔽移动，这里选择不屏蔽，允许一边跑一边买
+        }
+
         if (ch == 'w' || ch == 's' || ch == 'a' || ch == 'd') {
             ctx.is_auto_moving = false;
             int dx=0, dy=0; if(ch=='w') dy=-1; if(ch=='s') dy=1; if(ch=='a') dx=-1; if(ch=='d') dx=1;
@@ -803,7 +893,7 @@ int main() {
         if (ctx.state == STATE_LOGIN) draw_login();
         else if (ctx.state == STATE_LOBBY) draw_lobby();
         else if (ctx.state == STATE_ROOM) draw_room();
-        else if (ctx.state == STATE_PICK) draw_pick_screen(); // [新增] 绘制选人界面
+        else if (ctx.state == STATE_PICK) draw_pick_screen(); 
         else if (ctx.state == STATE_GAME) { draw_game_scene(); draw_game_ui(); }
 
         refresh();

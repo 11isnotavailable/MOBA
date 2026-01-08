@@ -27,6 +27,12 @@ struct PlayerState {
     int room_slot; // 0-9
     bool is_ready;
     std::string name;
+
+    // [新增] 战斗属性与经济系统
+    int gold;
+    int base_def;                       // 基础防御力
+    std::vector<int> inventory;         // 物品ID列表
+    long long last_regen_passive_time;  // 霸者之装回血计时器
 };
 
 struct TowerObj {
@@ -140,8 +146,15 @@ private:
     bool handle_attack_logic(int attacker_fd);
     void broadcast_world(long long now);
 
-    // [新增] 这里就是你缺失的声明
     void start_battle(); 
+
+    // [新增] 商店与属性计算逻辑
+    void handle_buy_item(int fd, int item_id);
+    int get_total_atk(const PlayerState& p);
+    int get_total_def(const PlayerState& p);
+    int get_total_max_hp(const PlayerState& p);
+    bool has_item(const PlayerState& p, int item_id);
+    void add_gold(int player_id, int amount);
     
     // 工具
     bool is_valid_move(int x, int y);

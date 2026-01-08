@@ -28,8 +28,8 @@
 #define HERO_MAGE    2
 #define HERO_TANK    3
 
-// === 房间状态 (新功能) ===
-#define ROOM_STATUS_WAITING 0  //在大厅/房间等待
+// === 房间状态 ===
+#define ROOM_STATUS_WAITING 0  // 大厅/房间等待
 #define ROOM_STATUS_PICKING 1  // 选人阶段
 #define ROOM_STATUS_PLAYING 2  // 游戏进行中
 
@@ -45,6 +45,16 @@
 #define MONSTER_TYPE_BLUE     3  
 #define BOSS_TYPE_OVERLORD    4  
 #define BOSS_TYPE_TYRANT      5  
+
+// === [新增] 商店与物品定义 ===
+#define ITEM_CLOTH_ARMOR    1  // 布甲 (Def+50, HP+500)
+#define ITEM_IRON_SWORD     2  // 铁剑 (Atk+100)
+#define ITEM_LIFESTEAL      3  // 泣血之刃 (Atk+300, 吸血)
+#define ITEM_REGEN_ARMOR    4  // 霸者之装 (HP+2000, Def+200, 回血)
+#define ITEM_ARMY_BREAKER   5  // 破军 (Atk+500)
+
+#define PRICE_NORMAL        500
+#define PRICE_SPECIAL       2000
 
 // ==========================================
 // [Part 2] 网络协议包定义
@@ -64,7 +74,7 @@
 #define TYPE_JOIN_ROOM      23
 #define TYPE_LEAVE_ROOM     24
 #define TYPE_MATCH_REQ      25
-#define TYPE_ROOM_UPDATE    26 // 房间状态更新(包含选人信息)
+#define TYPE_ROOM_UPDATE    26 // 房间状态更新
 #define TYPE_GAME_START     27 // 正式开始游戏
 
 // 游戏逻辑
@@ -75,6 +85,7 @@
 #define TYPE_ATTACK         5  
 #define TYPE_SPELL          6  
 #define TYPE_EFFECT         7  
+#define TYPE_BUY_ITEM       30 // [新增] 购买物品
 
 // --- 返回码 ---
 #define RET_SUCCESS      0
@@ -129,13 +140,13 @@ struct RoomSlot {
     int is_ready;
     int is_owner;
     int team;     // 1 or 2
-    int hero_id;  // [新增] 0:未选, 1:Warrior, 2:Mage, 3:Tank
+    int hero_id;  // 0:未选, 1:Warrior, 2:Mage, 3:Tank
 };
 
 struct RoomStatePacket {
     int type;      // TYPE_ROOM_UPDATE
     int room_id;
-    int status;    // [新增] 房间当前状态 (WAITING/PICKING/PLAYING)
+    int status;    // 房间当前状态 (WAITING/PICKING/PLAYING)
     RoomSlot slots[10];
 };
 
@@ -160,6 +171,7 @@ struct GamePacket {
     int attack_range;
     int effect;            
     int attack_target_id;  
+    int gold;       // [新增] 用于同步客户端金币显示
 };
 
 // ==========================================
@@ -179,7 +191,6 @@ struct GamePacket {
 #define MONSTER_REGEN_TICK    5000    
 
 // BOSS 数值
-// 主宰: 6w血, 200攻, 2.5s/次
 #define OVERLORD_HP           60000
 #define OVERLORD_DMG          200
 #define OVERLORD_ATK_CD       2500
@@ -187,7 +198,6 @@ struct GamePacket {
 #define OVERLORD_SKILL_DELAY  1500 
 #define OVERLORD_SKILL_RADIUS 4 
 
-// 暴君: 4w血, 300攻, 2.0s/次
 #define TYRANT_HP             40000
 #define TYRANT_DMG            300
 #define TYRANT_ATK_CD         2000
@@ -203,8 +213,7 @@ struct GamePacket {
 #define TOWER_BASE_DMG_MINION 300     
 #define TOWER_BASE_DMG_HERO   300     
 
-// [修改] 小兵速度调整
-// 服务端 5ms 一帧 (200 FPS)。要每秒走 2 格 -> 2 / 200 = 0.01 格/帧
+// 小兵速度调整: 每秒走 2 格 -> 0.01 格/帧 (200FPS)
 #define MINION_MOVE_SPEED     0.01f    
 
 #define MINION_ATK_COOLDOWN   2000    
