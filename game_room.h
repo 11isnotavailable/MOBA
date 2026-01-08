@@ -84,7 +84,7 @@ struct SkillEffectObj {
 class GameRoom {
 public:
     int room_id;
-    int status; // 0: Waiting, 1: Playing
+    int status; // 0:Waiting, 1:Picking, 2:Playing
     
     // 构造/析构
     GameRoom(int id, const std::string& owner_name);
@@ -107,7 +107,7 @@ public:
     bool is_empty();
     std::vector<int> get_player_fds();
     
-    // [新增] 获取指定 fd 玩家在游戏内的实体 ID
+    // 获取指定 fd 玩家在游戏内的实体 ID
     int get_player_id(int fd);
 
 private:
@@ -139,6 +139,9 @@ private:
     void update_jungle(long long now);
     bool handle_attack_logic(int attacker_fd);
     void broadcast_world(long long now);
+
+    // [新增] 这里就是你缺失的声明
+    void start_battle(); 
     
     // 工具
     bool is_valid_move(int x, int y);

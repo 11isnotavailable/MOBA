@@ -91,18 +91,27 @@ int main() {
                         int type = *(int*)(buf_obj.data + ptr);
                         int pkt_len = 0;
 
-                        // 确定包长
-                        if (type == TYPE_LOGIN_REQ || type == TYPE_REG_REQ) pkt_len = sizeof(LoginPacket);
-                        else if (type == TYPE_JOIN_ROOM || type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomControlPacket);
-                        else if (type >= 10 && type <= 21) pkt_len = sizeof(int); // 只有头的包
-                        else pkt_len = sizeof(GamePacket); // 游戏包
+                        // === [修复] 正确的包长度判断 ===
+                        if (type == TYPE_LOGIN_REQ || type == TYPE_REG_REQ) {
+                            pkt_len = sizeof(LoginPacket);
+                        }
+                        else if (type == TYPE_JOIN_ROOM || type == TYPE_ROOM_UPDATE) {
+                            // 这里的 ROOM_UPDATE 指的是客户端发来的 RoomControlPacket
+                            pkt_len = sizeof(RoomControlPacket);
+                        }
+                        else if (type >= 20 && type <= 29) {
+                            // [关键修复] 20-29 范围内的其他包（Create, Leave, Match, Start）都只有包头(int)
+                            // 注意：JOIN_ROOM(23) 和 ROOM_UPDATE(26) 在上面已经被特判了
+                            pkt_len = sizeof(int); 
+                        }
+                        else {
+                            // 剩下的默认为游戏包 (MOVE, ATTACK, SELECT...)
+                            pkt_len = sizeof(GamePacket); 
+                        }
 
                         if (buf_obj.len - ptr < pkt_len) break; // 数据不够完整包
 
                         void* pdata = buf_obj.data + ptr;
-
-                        // [调试日志] 可以在这里监控所有包
-                        // if (type == TYPE_MOVE) std::cout << "[NET] Recv MOVE from " << fd << std::endl;
 
                         // 3. 处理包
                         if (type == TYPE_LOGIN_REQ || type == TYPE_REG_REQ) {
@@ -113,15 +122,18 @@ int main() {
                             resp.result = ret; resp.user_id = fd; 
                             write(fd, &resp, sizeof(resp));
                         }
-                        else if (type >= 14 && type <= 21) {
-                            if (type == TYPE_ROOM_UPDATE) room_mgr.handle_room_control(fd, *(RoomControlPacket*)pdata);
-                            else room_mgr.handle_lobby_packet(fd, type, pdata);
+                        // [关键修复] 处理大厅/房间管理包 (20-29)
+                        else if (type >= 20 && type <= 29) {
+                            if (type == TYPE_ROOM_UPDATE) {
+                                room_mgr.handle_room_control(fd, *(RoomControlPacket*)pdata);
+                            }
+                            else {
+                                // 包含 CREATE(22), JOIN(23), LEAVE(24), LIST(20), MATCH(25), START(27)
+                                room_mgr.handle_lobby_packet(fd, type, pdata);
+                            }
                         }
                         else {
-                            // [DEBUG] 如果是移动包，在这里打印
-                            if (type == TYPE_MOVE) {
-                                std::cout << "[NET] Recv MOVE from FD: " << fd << ". Forwarding to Room..." << std::endl;
-                            }
+                            // 游戏逻辑包 (MOVE, ATTACK, SELECT)
                             room_mgr.handle_game_packet(fd, *(GamePacket*)pdata);
                         }
 

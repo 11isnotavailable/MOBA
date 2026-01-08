@@ -23,6 +23,7 @@ enum AppState {
     STATE_LOGIN,
     STATE_LOBBY,
     STATE_ROOM,
+    STATE_PICK, // [新增] 选人阶段
     STATE_GAME
 };
 
@@ -40,6 +41,9 @@ struct AppContext {
     bool is_matching;
     RoomStatePacket current_room; 
     int my_slot_idx; 
+
+    // Hero Selection [新增]
+    int pick_cursor; // 0:Warrior, 1:Mage, 2:Tank
 
     // Game Data
     int game_map[MAP_SIZE][MAP_SIZE];
@@ -106,7 +110,7 @@ void update_camera(int hx, int hy) {
 }
 
 // ==========================================
-// 3. 界面绘制 (Login/Lobby/Room)
+// 3. 界面绘制 (Login/Lobby/Room/Pick)
 // ==========================================
 
 void draw_login() {
@@ -140,7 +144,8 @@ void draw_lobby() {
     mvprintw(4, 4, "ID   Owner           Players   Status");
     for (size_t i = 0; i < ctx.room_list.size(); i++) {
         RoomInfo& r = ctx.room_list[i];
-        mvprintw(6 + i, 4, "#%-3d %-15s %d/10     %s", r.room_id, r.owner_name, r.player_count, (r.status==0?"Waiting":"Playing"));
+        const char* st = (r.status == ROOM_STATUS_WAITING) ? "Waiting" : ((r.status == ROOM_STATUS_PICKING) ? "Picking" : "Playing");
+        mvprintw(6 + i, 4, "#%-3d %-15s %d/10     %s", r.room_id, r.owner_name, r.player_count, st);
     }
     int by = LINES - 4;
     attron(A_BOLD);
@@ -180,8 +185,104 @@ void draw_room() {
     int by = LINES - 3;
     bool am_i_owner = (ctx.my_slot_idx >= 0) ? ctx.current_room.slots[ctx.my_slot_idx].is_owner : false;
     mvprintw(by, 2, "[Q] Leave Room   [Click] Switch Slot");
-    if (am_i_owner) { attron(A_BOLD | A_BLINK); mvprintw(by, 30, "[ENTER] START GAME"); attroff(A_BOLD | A_BLINK); }
+    if (am_i_owner) { attron(A_BOLD | A_BLINK); mvprintw(by, 30, "[ENTER] START GAME (Go to Pick)"); attroff(A_BOLD | A_BLINK); }
     else mvprintw(by, 30, "[R] Toggle Ready");
+}
+
+// [新增] 英雄选择界面
+void draw_pick_screen() {
+    erase();
+    int cx = COLS / 2;
+    int cy = LINES / 2;
+
+    attron(A_BOLD | COLOR_PAIR(4));
+    mvprintw(2, cx - 10, "=== SELECT YOUR HERO ===");
+    attroff(A_BOLD | COLOR_PAIR(4));
+
+    // --- 左侧：英雄列表 ---
+    int left_x = cx - 25;
+    int start_y = cy - 5;
+    
+    const char* heroes[] = { "1. Warrior (Melee)", "2. Mage    (Range)", "3. Tank    (Shield)" };
+    
+    attron(COLOR_PAIR(1)); 
+    mvprintw(start_y - 2, left_x, "Available Heroes:");
+    attroff(COLOR_PAIR(1));
+
+    for (int i = 0; i < 3; i++) {
+        if (ctx.pick_cursor == i) attron(A_REVERSE | A_BOLD);
+        mvprintw(start_y + i * 2, left_x, "%s", heroes[i]);
+        if (ctx.pick_cursor == i) attroff(A_REVERSE | A_BOLD);
+    }
+    
+    // --- 中间：英雄详情 ---
+    int mid_x = cx;
+    attron(COLOR_PAIR(14));
+    mvprintw(start_y - 2, mid_x, "Details:");
+    
+    const char* name = (ctx.pick_cursor==0?"Warrior":(ctx.pick_cursor==1?"Mage":"Tank"));
+    const char* role = (ctx.pick_cursor==0?"Fighter":(ctx.pick_cursor==1?"Caster":"Defender"));
+    int hp = (ctx.pick_cursor==0?2000:(ctx.pick_cursor==1?1500:3000));
+    int dmg = (ctx.pick_cursor==0?500:(ctx.pick_cursor==1?600:300));
+    
+    mvprintw(start_y, mid_x,   "Name: %s", name);
+    mvprintw(start_y+1, mid_x, "Role: %s", role);
+    mvprintw(start_y+2, mid_x, "HP:   %d", hp);
+    mvprintw(start_y+3, mid_x, "DMG:  %d", dmg);
+    
+    // 简易ASCII头像
+    mvprintw(start_y+5, mid_x, "Visual:");
+    if(ctx.pick_cursor==0) { mvprintw(start_y+6, mid_x, "  O  "); mvprintw(start_y+7, mid_x, " /|\\ "); mvprintw(start_y+8, mid_x, " / \\ "); }
+    if(ctx.pick_cursor==1) { mvprintw(start_y+6, mid_x, "  * "); mvprintw(start_y+7, mid_x, " /|\\~"); mvprintw(start_y+8, mid_x, " / \\ "); }
+    if(ctx.pick_cursor==2) { mvprintw(start_y+6, mid_x, " [=] "); mvprintw(start_y+7, mid_x, " ||| "); mvprintw(start_y+8, mid_x, " ||| "); }
+    attroff(COLOR_PAIR(14));
+
+    // --- 右侧：队友状态 ---
+    int right_x = cx + 25;
+    mvprintw(start_y - 2, right_x, "--- Team Pick ---");
+    
+    // 确定我的队伍范围
+    int start_slot = (ctx.my_slot_idx < 5) ? 0 : 5;
+    
+    for (int i = 0; i < 5; i++) {
+        int slot_idx = start_slot + i;
+        auto& slot = ctx.current_room.slots[slot_idx];
+        
+        mvprintw(start_y + i * 2, right_x, "[%d] ", i+1);
+        
+        if (slot.is_taken) {
+            attron(A_BOLD);
+            printw("%-8s", slot.name);
+            attroff(A_BOLD);
+            
+            // 显示已选英雄
+            if (slot.hero_id == 0) {
+                attron(A_DIM); printw(" ..."); attroff(A_DIM);
+            } else {
+                int color = 0;
+                const char* hname = "?";
+                if(slot.hero_id == 1) { hname="WAR"; color=12; } // Green
+                if(slot.hero_id == 2) { hname="MAG"; color=14; } // Blue
+                if(slot.hero_id == 3) { hname="TNK"; color=13; } // Red
+                
+                printw(" ");
+                attron(COLOR_PAIR(color)); printw("[%s]", hname); attroff(COLOR_PAIR(color));
+            }
+            if (slot_idx == ctx.my_slot_idx) printw(" <");
+        } else {
+            attron(A_DIM); printw("Empty"); attroff(A_DIM);
+        }
+    }
+
+    int my_choice = ctx.current_room.slots[ctx.my_slot_idx].hero_id;
+    
+    if (my_choice == 0) {
+        mvprintw(LINES - 4, cx - 20, "Controls: [W/S] or [UP/DOWN] to Move, [ENTER] to Lock In");
+    } else {
+        attron(COLOR_PAIR(2) | A_BLINK | A_BOLD);
+        mvprintw(LINES - 4, cx - 15, "LOCKED IN! WAITING FOR OTHERS...");
+        attroff(COLOR_PAIR(2) | A_BLINK | A_BOLD);
+    }
 }
 
 // ==========================================
@@ -205,10 +306,8 @@ void draw_skill_box(int y, int x, char key, const char* name, int color) {
     attron(COLOR_PAIR(color)); mvprintw(y, x, "┌───┐"); mvprintw(y+1, x, "│ %c │", key); mvprintw(y+2, x, "└───┘"); attroff(COLOR_PAIR(color)); mvprintw(y+3, x, " %s", name);
 }
 
-// [修复] 主宰的喷泉特效
 void draw_effect_fountain(int cx, int cy) {
     int ui_offset = UI_TOP_H;
-    // 41:深紫(中心), 35:紫(中), 40:浅紫(外)
     struct Col { int dx; int h; int color; };
     std::vector<Col> cols = {
         {0, 4, COLOR_PAIR(41) | A_REVERSE | A_BOLD}, 
@@ -220,7 +319,6 @@ void draw_effect_fountain(int cx, int cy) {
         int wx = cx + c.dx;
         int sx = wx - ctx.cam_x;
         if (sx < 0 || sx >= ctx.view_w) continue;
-        
         for (int h = 0; h < c.h; h++) {
             int wy = cy - h; // 向上延伸
             int sy = wy - ctx.cam_y;
@@ -263,7 +361,6 @@ void draw_hero_visual(int wx, int wy, int hid, int cid, bool me, int eff) {
     attroff(attr);
 }
 void draw_effect_floor(int cx, int cy, int range, int type) {
-    // [修复2] 挂载主宰喷泉特效
     if (type == VFX_OVERLORD_DMG) {
         draw_effect_fountain(cx, cy);
         return;
@@ -346,17 +443,14 @@ void draw_game_scene() {
         else if (p.id >= JUNGLE_ID_START && p.id < 90000) { 
             draw_mini_hp_bar(sx, sy - 1, p.hp, p.max_hp, 20);
             
-            // [修复1] 红蓝Buff单独判断
             if (p.input == MONSTER_TYPE_RED) {
                 attron(COLOR_PAIR(13) | A_BOLD | A_REVERSE);
-                mvprintw(sy + UI_TOP_H, sx * 2, "R ");
-                mvprintw(sy + UI_TOP_H + 1, sx * 2, "!!");
+                mvprintw(sy + UI_TOP_H, sx * 2, "R "); mvprintw(sy + UI_TOP_H + 1, sx * 2, "!!");
                 attroff(COLOR_PAIR(13) | A_BOLD | A_REVERSE);
             }
             else if (p.input == MONSTER_TYPE_BLUE) {
                 attron(COLOR_PAIR(36) | A_BOLD | A_REVERSE);
-                mvprintw(sy + UI_TOP_H, sx * 2, "B ");
-                mvprintw(sy + UI_TOP_H + 1, sx * 2, "??");
+                mvprintw(sy + UI_TOP_H, sx * 2, "B "); mvprintw(sy + UI_TOP_H + 1, sx * 2, "??");
                 attroff(COLOR_PAIR(36) | A_BOLD | A_REVERSE);
             }
             else {
@@ -459,6 +553,7 @@ void process_network() {
         else if (type == TYPE_ROOM_LIST_RESP) pkt_len = sizeof(RoomListPacket);
         else if (type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomStatePacket);
         else if (type == TYPE_GAME_START || type == TYPE_FRAME || type == TYPE_UPDATE || type == TYPE_EFFECT) pkt_len = sizeof(GamePacket);
+        else if (type >= 10 && type <= 29) pkt_len = sizeof(int); // 简单的整数包
         
         if (pkt_len == 0) { ptr = buf_len; break; } 
         if (buf_len - ptr < pkt_len) break; 
@@ -479,18 +574,21 @@ void process_network() {
                 ctx.room_list.clear(); for(int i=0; i<l->count; i++) ctx.room_list.push_back(l->rooms[i]); 
             }
             else if (type == TYPE_ROOM_UPDATE) {
-                ctx.state = STATE_ROOM; ctx.is_matching = false; ctx.current_room = *(RoomStatePacket*)pdata; 
-            }
-            else if (type == TYPE_GAME_START) {
-                ctx.state = STATE_GAME; MapGenerator::init(ctx.game_map); 
-                GamePacket* gp = (GamePacket*)pdata; ctx.my_id = gp->id; update_camera(0,0); 
+                ctx.current_room = *(RoomStatePacket*)pdata; 
+                if (ctx.current_room.status == ROOM_STATUS_PICKING) ctx.state = STATE_PICK;
+                else ctx.state = STATE_ROOM;
+                ctx.is_matching = false; 
             }
         } 
-        else if (ctx.state == STATE_ROOM) {
+        else if (ctx.state == STATE_ROOM || ctx.state == STATE_PICK) {
             if (type == TYPE_ROOM_UPDATE) { 
                 ctx.current_room = *(RoomStatePacket*)pdata; 
                 ctx.my_slot_idx = -1; 
                 for(int i=0; i<10; i++) if(ctx.current_room.slots[i].is_taken && strcmp(ctx.current_room.slots[i].name, ctx.username.c_str())==0) ctx.my_slot_idx=i;
+                
+                // 状态跳转
+                if (ctx.current_room.status == ROOM_STATUS_PICKING) ctx.state = STATE_PICK;
+                else if (ctx.current_room.status == ROOM_STATUS_WAITING) ctx.state = STATE_ROOM;
             } 
             else if (type == TYPE_GAME_START) {
                 ctx.state = STATE_GAME; MapGenerator::init(ctx.game_map); 
@@ -516,10 +614,9 @@ void process_network() {
                     if (p.id == ctx.my_id) { 
                         ctx.my_hero_status = p; ctx.has_hero_data = true; 
                         
-                        // [修复4] 检测瞬移 (复活/传送)，如果距离过大，强制打断自动寻路
-                        // 避免客户端继续往死亡点跑
+                        // 检测瞬移 (复活/传送)，如果距离过大，强制打断自动寻路
                         int dist_sq = (p.x - old_x)*(p.x - old_x) + (p.y - old_y)*(p.y - old_y);
-                        if (dist_sq > 200) { // 超过一屏幕距离
+                        if (dist_sq > 200) { 
                             ctx.is_auto_moving = false;
                             update_camera(p.x, p.y);
                         } else {
@@ -588,7 +685,8 @@ void handle_inputs() {
             char* buf = (ctx.input_focus == 0) ? ctx.input_user : (ctx.input_focus == 1 ? ctx.input_pass : nullptr);
             if (buf && strlen(buf) < 15) { buf[strlen(buf)] = (char)ch; buf[strlen(buf)+1] = '\0'; }
         }
-    } else if (ctx.state == STATE_LOBBY && !ctx.is_matching) {
+    } 
+    else if (ctx.state == STATE_LOBBY && !ctx.is_matching) {
         if (ch == 'c' || ch == 'C') { int t = TYPE_CREATE_ROOM; write(ctx.sock, &t, sizeof(t)); }
         else if (ch == 'j' || ch == 'J') { 
             echo(); curs_set(1); mvprintw(LINES-2, 2, "Enter Room ID: "); char buf[16]; getnstr(buf, 10); noecho(); curs_set(0);
@@ -596,11 +694,15 @@ void handle_inputs() {
         }
         else if (ch == 'm' || ch == 'M') { int t = TYPE_MATCH_REQ; write(ctx.sock, &t, sizeof(t)); ctx.is_matching = true; }
         else if (ch == 'r' || ch == 'R') { int t = TYPE_ROOM_LIST_REQ; write(ctx.sock, &t, sizeof(t)); }
-    } else if (ctx.state == STATE_ROOM) {
+    } 
+    else if (ctx.state == STATE_ROOM) {
         bool owner = (ctx.my_slot_idx >= 0 && ctx.current_room.slots[ctx.my_slot_idx].is_owner);
         if (ch == 'q' || ch == 'Q') { int t = TYPE_LEAVE_ROOM; write(ctx.sock, &t, sizeof(t)); ctx.state = STATE_LOBBY; int r = TYPE_ROOM_LIST_REQ; write(ctx.sock, &r, sizeof(r)); }
         else if (ch == 'r' || ch == 'R') { if(!owner) { RoomControlPacket pkt = { TYPE_ROOM_UPDATE, ctx.current_room.room_id, -1, !ctx.current_room.slots[ctx.my_slot_idx].is_ready }; write(ctx.sock, &pkt, sizeof(pkt)); } }
-        else if (ch == '\n' && owner) { int t = TYPE_GAME_START; write(ctx.sock, &t, sizeof(t)); }
+        else if (ch == '\n' && owner) { 
+            // 房主开始游戏 -> 实际上是通知服务器切换到 Pick 状态
+            int t = TYPE_GAME_START; write(ctx.sock, &t, sizeof(t)); 
+        }
         else if (ch == KEY_MOUSE) {
             MEVENT e; if (getmouse(&e) == OK && (e.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED))) {
                 for (int i=0; i<10; i++) {
@@ -609,16 +711,34 @@ void handle_inputs() {
                 }
             }
         }
-    } else if (ctx.state == STATE_GAME) {
+    } 
+    // [新增] 选人阶段输入处理
+    else if (ctx.state == STATE_PICK) {
+        // 如果已经选定，禁止操作
+        if (ctx.my_slot_idx >= 0 && ctx.current_room.slots[ctx.my_slot_idx].hero_id != 0) return;
+
+        if (ch == KEY_UP || ch == 'w') {
+            ctx.pick_cursor--; if(ctx.pick_cursor < 0) ctx.pick_cursor = 2;
+        } 
+        else if (ch == KEY_DOWN || ch == 's') {
+            ctx.pick_cursor++; if(ctx.pick_cursor > 2) ctx.pick_cursor = 0;
+        }
+        else if (ch == '\n') {
+            // 发送选择
+            int hid = ctx.pick_cursor + 1; // 1,2,3
+            GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
+            pkt.type = TYPE_SELECT; 
+            pkt.input = hid;
+            write(ctx.sock, &pkt, sizeof(pkt));
+        }
+    }
+    else if (ctx.state == STATE_GAME) {
         if (ch == 'w' || ch == 's' || ch == 'a' || ch == 'd') {
             ctx.is_auto_moving = false;
             int dx=0, dy=0; if(ch=='w') dy=-1; if(ch=='s') dy=1; if(ch=='a') dx=-1; if(ch=='d') dx=1;
             GamePacket mv = {TYPE_MOVE, 0, dx, dy}; write(ctx.sock, &mv, sizeof(mv));
         } else if (ch == 'j' || ch == 'J') { GamePacket att = {TYPE_ATTACK}; write(ctx.sock, &att, sizeof(att)); }
-        
-        // [修复3] 明确处理 K 键回复技能
         else if (ch == 'k' || ch == 'K') { GamePacket spl = {TYPE_SPELL}; write(ctx.sock, &spl, sizeof(spl)); }
-        
         else if (ch == KEY_MOUSE) {
             MEVENT e; if (getmouse(&e) == OK && (e.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED))) {
                 int sx = e.x / 2; int sy = e.y - UI_TOP_H;
@@ -683,6 +803,7 @@ int main() {
         if (ctx.state == STATE_LOGIN) draw_login();
         else if (ctx.state == STATE_LOBBY) draw_lobby();
         else if (ctx.state == STATE_ROOM) draw_room();
+        else if (ctx.state == STATE_PICK) draw_pick_screen(); // [新增] 绘制选人界面
         else if (ctx.state == STATE_GAME) { draw_game_scene(); draw_game_ui(); }
 
         refresh();

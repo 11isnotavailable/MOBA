@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <chrono> // [修复] 必须包含此头文件
+#include <chrono> 
 
 // =========================================
 // 静态辅助函数与数据
@@ -20,7 +20,7 @@ static int dist_sq(int x1, int y1, int x2, int y2) {
     return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
 }
 
-// 英雄属性表
+// 英雄属性表 (与 server.cpp 保持一致)
 struct HeroData { int base_hp, range, dmg; };
 static std::map<int, HeroData> HERO_DB = {
     {HERO_WARRIOR, {HERO_HP_DEFAULT, 2, HERO_DMG_DEFAULT}},
@@ -28,7 +28,7 @@ static std::map<int, HeroData> HERO_DB = {
     {HERO_TANK,    {HERO_HP_DEFAULT, 2, HERO_DMG_DEFAULT}}
 };
 
-// 兵线路径
+// 兵线路径 (与 server.cpp 保持一致)
 struct Pt { int x, y; };
 static const std::vector<Pt> PATH_TOP = { {22, 128}, {22, 22},  {128, 22} };  
 static const std::vector<Pt> PATH_MID = { {22, 128}, {75, 75},  {128, 22} };  
@@ -40,19 +40,17 @@ static const std::vector<Pt> PATH_BOT = { {22, 128}, {128, 128},{128, 22} };
 
 GameRoom::GameRoom(int id, const std::string& owner_name) {
     this->room_id = id;
-    this->status = 0; // Waiting
+    this->status = ROOM_STATUS_WAITING;
     this->game_start_time = 0;
     this->wave_count = 0;
     this->last_spawn_minute = -1;
     
-    // 初始化 ID 计数器
     this->global_id_counter = 1;
     this->tower_id_counter = TOWER_ID_START;
     this->minion_id_counter = MINION_ID_START;
     this->jungle_id_counter = JUNGLE_ID_START;
     this->boss_id_counter = BOSS_ID_START;
     
-    // 初始化地图
     MapGenerator::init(this->game_map);
 }
 
@@ -66,7 +64,7 @@ GameRoom::~GameRoom() {
 
 bool GameRoom::add_player(int fd, const std::string& name) {
     if (players.size() >= 10) return false;
-    if (status == 1) return false; // 游戏中禁止加入
+    if (status != ROOM_STATUS_WAITING) return false; 
 
     PlayerState p;
     p.fd = fd;
@@ -74,28 +72,24 @@ bool GameRoom::add_player(int fd, const std::string& name) {
     p.id = global_id_counter++;
     p.is_ready = false;
     p.is_playing = false;
+    p.hero_id = 0; // 未选
     
-    // 自动分配空闲座位 (0-9)
+    // 自动分配空闲座位
     std::vector<int> taken_slots;
     for(auto& pair : players) taken_slots.push_back(pair.second.room_slot);
-    
     for(int i=0; i<10; i++) {
         bool taken = false;
         for(int s : taken_slots) if(s == i) taken = true;
         if(!taken) { p.room_slot = i; break; }
     }
     
-    // 决定阵营: 0-4 Team1(上), 5-9 Team2(下)
     p.color = (p.room_slot < 5) ? 1 : 2;
-    
     players[fd] = p;
     return true;
 }
 
 void GameRoom::remove_player(int fd) {
-    if (players.count(fd)) {
-        players.erase(fd);
-    }
+    if (players.count(fd)) players.erase(fd);
 }
 
 void GameRoom::set_ready(int fd, bool ready) {
@@ -105,40 +99,53 @@ void GameRoom::set_ready(int fd, bool ready) {
 void GameRoom::change_slot(int fd, int target_slot) {
     if (target_slot < 0 || target_slot > 9) return;
     if (players.count(fd) == 0) return;
-
-    // 检查目标位置是否有人
     for(auto& pair : players) {
         if (pair.second.room_slot == target_slot) return; 
     }
-    
     players[fd].room_slot = target_slot;
     players[fd].color = (target_slot < 5) ? 1 : 2;
 }
 
+// [流程修正] 开始游戏 -> 进入选人阶段 (ROOM_STATUS_PICKING)
 bool GameRoom::start_game(int fd_requester) {
-    if (status == 1) return false;
+    if (status != ROOM_STATUS_WAITING) return false;
     
-    status = 1; // Playing
+    status = ROOM_STATUS_PICKING; // 进入选人
+    
+    // 重置所有人的选择
+    for(auto& pair : players) {
+        pair.second.hero_id = 0; 
+    }
+    
+    // 广播状态更新，通知客户端切界面
+    RoomStatePacket pkt = get_room_state_packet();
+    for(auto& pair : players) {
+        write(pair.first, &pkt, sizeof(pkt));
+    }
+    return true;
+}
+
+// [新增] 真正开始战斗的初始化（全员选完人后自动调用）
+void GameRoom::start_battle() {
+    status = ROOM_STATUS_PLAYING; // 正式开打
     game_start_time = get_current_ms();
     
-    // 初始化地图实体
-    init_map_and_units();
+    init_map_and_units(); // 生成塔、野怪
     
-    // 初始化玩家战斗属性
     for(auto& pair : players) {
         PlayerState& p = pair.second;
         p.is_playing = true;
-        p.hero_id = HERO_WARRIOR; // 默认
-        p.max_hp = HERO_HP_DEFAULT;
+        if (HERO_DB.count(p.hero_id)) {
+            p.max_hp = HERO_DB[p.hero_id].base_hp;
+        } else {
+            p.max_hp = HERO_HP_DEFAULT;
+        }
         p.hp = p.max_hp;
-        // 设定出生点
         p.x = (p.color == 1) ? 22 : 128;
         p.y = (p.color == 1) ? 128 : 22;
         p.last_aggressive_time = 0;
         p.visual_end_time = 0;
     }
-    
-    return true;
 }
 
 RoomInfo GameRoom::get_room_info() {
@@ -146,9 +153,8 @@ RoomInfo GameRoom::get_room_info() {
     info.room_id = room_id;
     info.player_count = players.size();
     info.max_player = 10;
-    info.status = status;
+    info.status = status; 
     
-    // 寻找房主 (slot最小者)
     int min_slot = 99;
     std::string owner = "System";
     for(auto& pair : players) {
@@ -165,6 +171,7 @@ RoomStatePacket GameRoom::get_room_state_packet() {
     RoomStatePacket pkt;
     pkt.type = TYPE_ROOM_UPDATE;
     pkt.room_id = room_id;
+    pkt.status = status;
     memset(pkt.slots, 0, sizeof(pkt.slots));
     
     int min_slot = 99;
@@ -178,6 +185,7 @@ RoomStatePacket GameRoom::get_room_state_packet() {
             strncpy(pkt.slots[s].name, p.name.c_str(), 31);
             pkt.slots[s].is_ready = p.is_ready;
             pkt.slots[s].team = p.color;
+            pkt.slots[s].hero_id = p.hero_id;
             if(s == min_slot) pkt.slots[s].is_owner = 1;
         }
     }
@@ -190,90 +198,77 @@ std::vector<int> GameRoom::get_player_fds() {
     return fds;
 }
 
-// [新增] 获取玩家真实Entity ID
 int GameRoom::get_player_id(int fd) {
     if (players.count(fd)) return players[fd].id;
     return -1;
 }
 
-bool GameRoom::is_empty() {
-    return players.empty();
-}
+bool GameRoom::is_empty() { return players.empty(); }
 
 // =========================================
-// 游戏核心逻辑 (物理/AI/战斗)
+// 游戏核心逻辑 (严格移植自 server.cpp)
 // =========================================
 
 void GameRoom::handle_game_packet(int fd, const GamePacket& pkt) {
-    // 1. 基础检查：房间状态必须是 playing (1)，玩家必须存在
-    if (status != 1) {
-        // std::cout << "[ROOM] Ignored packet: Room not playing." << std::endl;
+    if (players.count(fd) == 0) return;
+    PlayerState& p = players[fd];
+
+    // === 阶段1：选人 ===
+    if (status == ROOM_STATUS_PICKING) { 
+        if (pkt.type == TYPE_SELECT) {
+            if (HERO_DB.count(pkt.input)) {
+                p.hero_id = pkt.input;
+                std::cout << "[ROOM] Player " << p.name << " selected " << p.hero_id << std::endl;
+
+                // 广播最新的选择
+                RoomStatePacket state = get_room_state_packet();
+                for(auto& pair : players) write(pair.first, &state, sizeof(state));
+
+                // 检查是否全员选完
+                bool all_selected = true;
+                for(auto& pair : players) if(pair.second.hero_id == 0) all_selected = false;
+                
+                if(all_selected) {
+                    start_battle(); // 切换到 PLAYING 并初始化
+                    // 广播 GAME_START
+                    GamePacket start_pkt; memset(&start_pkt, 0, sizeof(start_pkt));
+                    start_pkt.type = TYPE_GAME_START;
+                    for(auto& pair : players) {
+                        start_pkt.id = pair.second.id;
+                        write(pair.first, &start_pkt, sizeof(start_pkt));
+                    }
+                }
+            }
+        }
         return;
     }
-    if (players.count(fd) == 0) return;
 
-    PlayerState& p = players[fd];
-    
-    if (pkt.type == TYPE_MOVE) {
-        int dx = pkt.x;
-        int dy = pkt.y;
-
-        // 限制输入范围，防止瞬移
-        if (dx < -1) dx = -1; if (dx > 1) dx = 1;
-        if (dy < -1) dy = -1; if (dy > 1) dy = 1;
-        
-        int nx = p.x + dx;
-        int ny = p.y + dy;
-
-        // [DEBUG] 打印移动意图
-        // std::cout << "[ROOM] Player " << p.id << " (" << p.name << ") wants move: " 
-        //           << p.x << "," << p.y << " -> " << nx << "," << ny << std::endl;
-
-        // 碰撞检测
-        bool blocked = false;
-        if (!is_valid_move(nx, ny)) {
-            blocked = true; // 撞地图边界或墙
-            std::cout << "[ROOM] Blocked by WALL/MAP at " << nx << "," << ny << std::endl;
-        } 
-        else if (is_blocked_by_tower(nx, ny)) {
-            blocked = true; // 撞塔
-            std::cout << "[ROOM] Blocked by TOWER at " << nx << "," << ny << std::endl;
+    // === 阶段2：战斗 ===
+    if (status == ROOM_STATUS_PLAYING && p.is_playing) { 
+        if (pkt.type == TYPE_MOVE) {
+            int dx = pkt.x; int dy = pkt.y;
+            if (dx < -1) dx = -1; if (dx > 1) dx = 1;
+            if (dy < -1) dy = -1; if (dy > 1) dy = 1;
+            int nx = p.x + dx; int ny = p.y + dy;
+            if (!is_blocked_by_tower(nx, ny)) { 
+                p.x = nx; p.y = ny; 
+            }
         }
-
-        if (!blocked) { 
-            p.x = nx; 
-            p.y = ny; 
-            std::cout << "[ROOM] Move OK: " << p.id << " is now at " << p.x << "," << p.y << std::endl;
+        else if (pkt.type == TYPE_ATTACK) {
+            handle_attack_logic(fd);
         }
-    }
-    else if (pkt.type == TYPE_ATTACK) {
-        bool hit = handle_attack_logic(fd);
-        if (hit) {
-            std::cout << "[ROOM] Player " << p.id << " ATTACK HIT!" << std::endl;
-        } else {
-            std::cout << "[ROOM] Player " << p.id << " ATTACK MISS (No target in range)." << std::endl;
-        }
-    }
-    else if (pkt.type == TYPE_SPELL) {
-        p.hp += 100; 
-        if(p.hp > p.max_hp) p.hp = p.max_hp;
-    }
-    else if (pkt.type == TYPE_SELECT) {
-        if (HERO_DB.count(pkt.input)) {
-            p.hero_id = pkt.input;
-            p.max_hp = HERO_DB[pkt.input].base_hp;
-            p.hp = p.max_hp;
-            std::cout << "[ROOM] Player " << p.id << " selected hero " << p.hero_id << std::endl;
+        else if (pkt.type == TYPE_SPELL) {
+            p.hp += 100; 
+            if(p.hp > p.max_hp) p.hp = p.max_hp;
         }
     }
 }
 
 void GameRoom::update_logic() {
-    if (status != 1) return;
+    if (status != ROOM_STATUS_PLAYING) return; // 只有游戏中才更新AI
     
     long long now = get_current_ms();
     
-    // 1. 每分钟出兵
     int current_sec = (now - game_start_time) / 1000;
     if (current_sec >= 30 && (current_sec - 30) % 60 == 0) {
         if (current_sec != last_spawn_minute) { 
@@ -282,21 +277,19 @@ void GameRoom::update_logic() {
         }
     }
 
-    // 2. 实体更新
     update_towers(now);
     update_minions(now);
     update_jungle(now);
-    
-    // 3. 状态广播
     broadcast_world(now);
 }
 
 // =========================================
-// 私有辅助逻辑 (初始化与AI)
+// 私有辅助逻辑 (逻辑还原)
 // =========================================
 
 void GameRoom::init_map_and_units() {
-    // 1. 初始化防御塔
+    // 1. Init Towers (Copied from server.cpp)
+    towers.clear();
     for(int y=0; y<MAP_SIZE; y++) {
         for(int x=0; x<MAP_SIZE; x++) {
             int t = game_map[y][x];
@@ -311,14 +304,10 @@ void GameRoom::init_map_and_units() {
                 } else {
                     if (t >= 11 && t <= 13) {
                         tower.team = 1;
-                        if(t==11) tower.max_hp=TOWER_HP_TIER_1; 
-                        else if(t==12) tower.max_hp=TOWER_HP_TIER_2; 
-                        else tower.max_hp=TOWER_HP_TIER_3;
+                        if(t==11) tower.max_hp=TOWER_HP_TIER_1; else if(t==12) tower.max_hp=TOWER_HP_TIER_2; else tower.max_hp=TOWER_HP_TIER_3;
                     } else {
                         tower.team = 2;
-                        if(t==21) tower.max_hp=TOWER_HP_TIER_1; 
-                        else if(t==22) tower.max_hp=TOWER_HP_TIER_2; 
-                        else tower.max_hp=TOWER_HP_TIER_3;
+                        if(t==21) tower.max_hp=TOWER_HP_TIER_1; else if(t==22) tower.max_hp=TOWER_HP_TIER_2; else tower.max_hp=TOWER_HP_TIER_3;
                     }
                 }
                 tower.hp = tower.max_hp;
@@ -326,52 +315,49 @@ void GameRoom::init_map_and_units() {
             }
         }
     }
+
+    // 2. Init Jungle (Copied from server.cpp, including Boss positions)
+    jungle_mobs.clear();
     
-    // 2. 初始化 Boss (位置更新为向中路迁移20格)
-    // 主宰 (Overlord) @ (55, 55)
+    // Bosses (坐标更新为向中心靠拢)
     JungleObj overlord;
     overlord.id = boss_id_counter++; overlord.type = BOSS_TYPE_OVERLORD;
     overlord.x = 55; overlord.y = 55; 
     overlord.hp = OVERLORD_HP; overlord.max_hp = OVERLORD_HP;
     overlord.dmg = OVERLORD_DMG; overlord.range = OVERLORD_RANGE;
-    overlord.boss_state = 0; overlord.target_id = 0;
-    overlord.last_hit_by_time = 0; overlord.last_attack_time = 0; overlord.last_regen_time = 0;
+    overlord.target_id = 0; overlord.last_hit_by_time = 0; overlord.last_attack_time = 0; overlord.last_regen_time = 0;
+    overlord.attack_counter = 0; overlord.boss_state = 0; // IDLE
     jungle_mobs[overlord.id] = overlord;
-    
-    // 暴君 (Tyrant) @ (95, 95)
+
     JungleObj tyrant;
     tyrant.id = boss_id_counter++; tyrant.type = BOSS_TYPE_TYRANT;
-    tyrant.x = 95; tyrant.y = 95;
+    tyrant.x = 95; tyrant.y = 95; 
     tyrant.hp = TYRANT_HP; tyrant.max_hp = TYRANT_HP;
     tyrant.dmg = TYRANT_DMG; tyrant.range = TYRANT_RANGE;
-    tyrant.boss_state = 0; tyrant.target_id = 0;
-    tyrant.last_hit_by_time = 0; tyrant.last_attack_time = 0; tyrant.last_regen_time = 0;
+    tyrant.target_id = 0; tyrant.last_hit_by_time = 0; tyrant.last_attack_time = 0; tyrant.last_regen_time = 0;
+    tyrant.attack_counter = 0; tyrant.boss_state = 0; // IDLE
     jungle_mobs[tyrant.id] = tyrant;
 
-    // 3. 初始化普通野怪
+    // Normal Mobs
     struct Zone { int x, y, size; int buff_type; };
     std::vector<Zone> zones = {
-        {56, 96, 26, MONSTER_TYPE_BLUE}, 
-        {68, 28, 26, MONSTER_TYPE_RED}, 
-        {28, 62, 26, MONSTER_TYPE_RED}, 
-        {96, 62, 26, MONSTER_TYPE_BLUE} 
+        {56, 96, 26, MONSTER_TYPE_BLUE}, {68, 28, 26, MONSTER_TYPE_RED}, 
+        {28, 62, 26, MONSTER_TYPE_RED}, {96, 62, 26, MONSTER_TYPE_BLUE} 
     };
 
     for (const auto& z : zones) {
         int cx = z.x + z.size / 2;
         int cy = z.y + z.size / 2;
         
-        // Buff怪
         JungleObj buff;
         buff.id = jungle_id_counter++; buff.type = z.buff_type; 
         buff.x = cx; buff.y = cy;
         buff.hp = MONSTER_BUFF_HP; buff.max_hp = MONSTER_BUFF_HP;
         buff.dmg = MONSTER_BUFF_DMG; buff.range = MONSTER_BUFF_RANGE;
         buff.target_id = 0; buff.last_hit_by_time = 0; buff.last_attack_time = 0; buff.last_regen_time = 0;
-        buff.boss_state = 0; // IDLE
+        buff.boss_state = 0;
         jungle_mobs[buff.id] = buff;
 
-        // 普通野怪
         int std_count = 0, attempts = 0;
         while(std_count < 3 && attempts < 50) { 
             attempts++;
@@ -430,6 +416,7 @@ void GameRoom::spawn_wave() {
     }
 }
 
+// [修复] 严格移植自 server.cpp 的防御塔逻辑
 void GameRoom::update_towers(long long now) {
     int tower_range_sq = TOWER_ATK_RANGE * TOWER_ATK_RANGE;
     
@@ -446,7 +433,6 @@ void GameRoom::update_towers(long long now) {
             int d = dist_sq(t.x, t.y, p.second.x, p.second.y);
             if (d > tower_range_sq) continue;
             
-            // 2秒内的仇恨判定
             if (now - p.second.last_aggressive_time < 2000) {
                 best_target = p.second.id;
                 break; // 找到仇恨目标，立即锁定
@@ -478,9 +464,9 @@ void GameRoom::update_towers(long long now) {
         }
 
         // 3. 索敌机制：如果完全没有目标，寻找最近的敌人
-        // [关键修复] 严格遵循 server.cpp 逻辑：先找小兵，只有完全没小兵时才找英雄
+        // [关键修复] 先找小兵，只有完全没小兵时才找英雄
         if (best_target == 0) {
-            // A. 先找小兵 (Minion Priority)
+            // A. 先找小兵
             for (auto& m : minions) {
                 if (m.second.team == t.team) continue;
                 int d = dist_sq(t.x, t.y, (int)m.second.x, (int)m.second.y);
@@ -490,7 +476,7 @@ void GameRoom::update_towers(long long now) {
                 }
             }
             
-            // B. 只有当 best_target 依然为 0 (没找到任何小兵) 时，才找玩家
+            // B. 只有没小兵时才找玩家
             if (best_target == 0) {
                 for (auto& p : players) {
                     if (!p.second.is_playing || p.second.color == t.team) continue;
@@ -526,29 +512,32 @@ void GameRoom::update_towers(long long now) {
                     t.target_id = 0; t.consecutive_hits = 0;
                 }
             } else if (minions.count(t.target_id)) {
-                // 小兵伤害成长
                 minions[t.target_id].hp -= (TOWER_BASE_DMG_MINION + 100 * wave_count);
             }
         }
     }
 }
 
+// [修复] 严格移植自 server.cpp 的小兵逻辑 (英雄 > 小兵 > 塔)
 void GameRoom::update_minions(long long now) {
     std::vector<int> dead_ids;
+    const std::vector<Pt>* paths[] = { &PATH_TOP, &PATH_MID, &PATH_BOT };
+
     for (auto& pair : minions) {
         MinionObj& m = pair.second;
         if (m.hp <= 0) { dead_ids.push_back(m.id); continue; }
-        
-        // MARCHING
-        if (m.state == 0) {
+
+        if (m.state == 0) { // MARCHING
             int min_d = 9999, found = 0;
             int vision_sq = MINION_VISION_RANGE * MINION_VISION_RANGE;
 
+            // 1. 优先检查玩家 (Hero First!)
             for (auto& p : players) {
                 if (!p.second.is_playing || p.second.color == m.team) continue;
                 int d = dist_sq((int)m.x, (int)m.y, p.second.x, p.second.y);
                 if (d <= vision_sq && d < min_d) { min_d = d; found = p.second.id; }
             }
+            // 2. 其次检查敌方小兵 (仅当没发现玩家时)
             if (found == 0) {
                 for (auto& em : minions) {
                     if (em.second.team == m.team) continue;
@@ -556,6 +545,7 @@ void GameRoom::update_minions(long long now) {
                     if (d <= vision_sq && d < min_d) { min_d = d; found = em.second.id; }
                 }
             }
+            // 3. 最后检查塔
             if (found == 0) {
                 for (auto& t : towers) {
                     if (t.second.team == m.team || t.second.hp <= 0) continue;
@@ -570,14 +560,14 @@ void GameRoom::update_minions(long long now) {
                 m.state = 1; m.target_id = found; // CHASING
                 m.anchor_x = m.x; m.anchor_y = m.y;
             } else {
-                // Move along path
-                const std::vector<Pt>* path = (m.lane == 0) ? &PATH_TOP : ((m.lane == 1) ? &PATH_MID : &PATH_BOT);
-                if (m.wp_idx >= 0 && m.wp_idx < (int)path->size()) {
-                    Pt target = (*path)[m.wp_idx];
+                // 沿路径移动
+                const auto& path = *paths[m.lane];
+                if (m.wp_idx >= 0 && m.wp_idx < (int)path.size()) {
+                    Pt target = path[m.wp_idx];
                     float dx = target.x - m.x, dy = target.y - m.y;
                     float dist = sqrt(dx*dx + dy*dy);
                     if (dist < 2.0f) {
-                        if (m.team == 1 && m.wp_idx < (int)path->size()-1) m.wp_idx++;
+                        if (m.team == 1 && m.wp_idx < (int)path.size()-1) m.wp_idx++;
                         else if (m.team == 2 && m.wp_idx > 0) m.wp_idx--;
                     } else {
                         m.x += (dx/dist) * MINION_MOVE_SPEED;
@@ -586,8 +576,7 @@ void GameRoom::update_minions(long long now) {
                 }
             }
         }
-        // CHASING
-        else if (m.state == 1) {
+        else if (m.state == 1) { // CHASING
             int dist_anchor = dist_sq((int)m.x, (int)m.y, (int)m.anchor_x, (int)m.anchor_y);
             if (dist_anchor > MINION_CHASE_LIMIT * MINION_CHASE_LIMIT) {
                 m.state = 2; m.target_id = 0; // RETURNING
@@ -609,7 +598,6 @@ void GameRoom::update_minions(long long now) {
                         if (now - m.last_attack_time >= MINION_ATK_COOLDOWN) {
                             m.last_attack_time = now;
                             m.visual_end_time = now + 200; 
-                            // [修复] 扣血
                             if (p) p->hp -= m.dmg;
                             else if (minions.count(m.target_id)) minions[m.target_id].hp -= m.dmg;
                             else if (towers.count(m.target_id)) towers[m.target_id].hp -= m.dmg; 
@@ -622,8 +610,7 @@ void GameRoom::update_minions(long long now) {
                 }
             }
         }
-        // RETURNING
-        else if (m.state == 2) {
+        else if (m.state == 2) { // RETURNING
             float dx = m.anchor_x - m.x, dy = m.anchor_y - m.y;
             float dist = sqrt(dx*dx + dy*dy);
             if (dist < 1.0f) m.state = 0; // MARCHING
@@ -636,6 +623,7 @@ void GameRoom::update_minions(long long now) {
     for(int id : dead_ids) minions.erase(id);
 }
 
+// [修复] 严格移植自 server.cpp 的野区/BOSS逻辑
 void GameRoom::update_jungle(long long now) {
     std::vector<int> dead_ids;
     
@@ -665,7 +653,7 @@ void GameRoom::update_jungle(long long now) {
         }
 
         if (m.target_id != 0) {
-            // === Boss 技能状态机 (修复版) ===
+            // === Boss 技能状态机 ===
             if (m.boss_state == 1) { // PREPARE (主宰蓄力)
                 if (m.type == BOSS_TYPE_OVERLORD) {
                     if (now - m.skill_start_time >= OVERLORD_SKILL_DELAY) {
@@ -782,6 +770,7 @@ void GameRoom::update_jungle(long long now) {
     for(int id : dead_ids) jungle_mobs.erase(id);
 }
 
+// [修复] 严格移植自 server.cpp 的攻击逻辑 (查找全局最近目标)
 bool GameRoom::handle_attack_logic(int attacker_fd) {
     PlayerState& att = players[attacker_fd];
     HeroData& tmpl = HERO_DB[att.hero_id];
@@ -790,22 +779,25 @@ bool GameRoom::handle_attack_logic(int attacker_fd) {
     int target_id = 0;
     int min_dist = 9999;
     
-    // 寻找最近敌人 (Player, Minion, Tower, Jungle)
+    // 1. Enemy Players
     for(auto& p : players) {
         if(p.second.color == att.color || !p.second.is_playing) continue;
         int d = dist_sq(att.x, att.y, p.second.x, p.second.y);
         if(d <= range_sq && d < min_dist) { min_dist=d; target_id=p.second.id; }
     }
+    // 2. Enemy Minions
     for (auto& m : minions) {
         if (m.second.team == att.color) continue;
         int d = dist_sq(att.x, att.y, (int)m.second.x, (int)m.second.y);
         if (d <= range_sq && d < min_dist) { min_dist = d; target_id = m.second.id; }
     }
+    // 3. Enemy Towers
     for (auto& t : towers) {
         if (t.second.team == att.color || t.second.hp <= 0) continue;
         int d = dist_sq(att.x, att.y, t.second.x, t.second.y);
         if (d <= range_sq + 10 && d < min_dist) { min_dist = d; target_id = t.second.id; }
     }
+    // 4. Jungle Mobs
     for (auto& m : jungle_mobs) {
         int d = dist_sq(att.x, att.y, m.second.x, m.second.y);
         if (d <= range_sq + 5 && d < min_dist) { min_dist = d; target_id = m.second.id; }
