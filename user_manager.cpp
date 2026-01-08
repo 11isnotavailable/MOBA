@@ -11,6 +11,7 @@ UserManager::~UserManager() {
 }
 
 void UserManager::load_db() {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
     std::ifstream in(db_file);
     if (!in.is_open()) {
         std::cout << "[UserManager] No user db found, creating new one." << std::endl;
@@ -32,14 +33,17 @@ void UserManager::load_db() {
 }
 
 void UserManager::save_db() {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
     std::ofstream out(db_file);
     for (auto& pair : all_users) {
         out << pair.second.username << " " << pair.second.password << "\n";
     }
     out.close();
+    // std::cout << "[Persist] Data saved to disk." << std::endl; 
 }
 
 int UserManager::register_user(const std::string& username, const std::string& password) {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
     if (all_users.count(username)) {
         return RET_FAIL_DUP; // 用户名已存在
     }
@@ -49,12 +53,14 @@ int UserManager::register_user(const std::string& username, const std::string& p
     d.password = password;
     all_users[username] = d;
     
-    save_db(); // 立即持久化
+    // save_db(); // [修改] 去掉立即保存，交由后台线程处理
     std::cout << "[UserManager] New user registered: " << username << std::endl;
     return RET_SUCCESS;
 }
 
 int UserManager::login_user(int fd, const std::string& username, const std::string& password) {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
+    
     if (all_users.count(username) == 0) {
         return RET_FAIL_NONAME;
     }
@@ -63,8 +69,16 @@ int UserManager::login_user(int fd, const std::string& username, const std::stri
         return RET_FAIL_PWD;
     }
 
-    if (is_online(username)) {
-        // 简单处理：不允许重复登录，或者顶号（这里选择不允许）
+    // [修改] 必须在锁内直接检查，不能调用 public 的 is_online()，否则会死锁
+    bool already_online = false;
+    for(auto& pair : online_users) {
+        if(pair.second == username) {
+            already_online = true;
+            break;
+        }
+    }
+
+    if (already_online) {
         return RET_FAIL_DUP;
     }
 
@@ -75,6 +89,7 @@ int UserManager::login_user(int fd, const std::string& username, const std::stri
 }
 
 void UserManager::logout_user(int fd) {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
     if (online_users.count(fd)) {
         std::cout << "[UserManager] User logout: " << online_users[fd] << std::endl;
         online_users.erase(fd);
@@ -82,17 +97,20 @@ void UserManager::logout_user(int fd) {
 }
 
 bool UserManager::is_online(const std::string& username) {
-    for (auto& pair : online_users) {
-        if (pair.second == username) return true;
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
+    for(auto& pair : online_users) {
+        if(pair.second == username) return true;
     }
     return false;
 }
 
 std::string UserManager::get_username(int fd) {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
     if (online_users.count(fd)) return online_users[fd];
     return "";
 }
 
 int UserManager::get_online_count() {
+    std::lock_guard<std::mutex> lock(mtx); // [新增] 加锁
     return online_users.size();
 }

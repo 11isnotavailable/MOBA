@@ -237,7 +237,7 @@ struct GameOverPacket {
 #define TOWER_BASE_DMG_HERO   300     
 
 // 小兵速度调整
-#define MINION_MOVE_SPEED     0.01f    
+#define MINION_MOVE_SPEED     0.02f    
 
 #define MINION_ATK_COOLDOWN   2000    
 #define MINION_TYPE_MELEE     1       

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <mutex> // [新增] 引入互斥锁
 
 // 简单的用户结构
 struct UserData {
@@ -23,12 +24,17 @@ private:
     // 在线列表: fd -> username
     std::map<int, std::string> online_users;
 
+    // [新增] 互斥锁，保护 all_users 和 online_users 的并发访问
+    std::mutex mtx;
+
     void load_db();
-    void save_db();
 
 public:
     UserManager(const std::string& filename = "users.txt");
     ~UserManager();
+
+    // [修改] 移到 public，供后台线程调用
+    void save_db();
 
     // 注册: 返回 RET_SUCCESS 或 RET_FAIL_DUP
     int register_user(const std::string& username, const std::string& password);
