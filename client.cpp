@@ -57,9 +57,12 @@ struct AppContext {
     GamePacket my_hero_status;
     bool has_hero_data;
     
-    // [新增] 经济系统状态
+    // [新增] 经济与战况数据
     int my_gold;
     bool show_shop;
+    int my_items[6];   // 装备栏
+    int team1_score;   // 蓝方击杀
+    int team2_score;   // 红方击杀
 
     int cam_x, cam_y;
     int view_w, view_h;
@@ -111,6 +114,18 @@ void update_camera(int hx, int hy) {
     if (ctx.cam_y < 0) ctx.cam_y = 0;
     if (ctx.cam_x > MAP_SIZE - ctx.view_w) ctx.cam_x = MAP_SIZE - ctx.view_w;
     if (ctx.cam_y > MAP_SIZE - ctx.view_h) ctx.cam_y = MAP_SIZE - ctx.view_h;
+}
+
+// [新增] 获取装备中文名
+const char* get_item_name(int id) {
+    switch(id) {
+        case ITEM_CLOTH_ARMOR: return "布甲";
+        case ITEM_IRON_SWORD: return "铁剑";
+        case ITEM_LIFESTEAL: return "泣血之刃";
+        case ITEM_REGEN_ARMOR: return "霸者重装";
+        case ITEM_ARMY_BREAKER: return "破军";
+        default: return "---";
+    }
 }
 
 // ==========================================
@@ -497,7 +512,7 @@ void draw_game_scene() {
     }
 }
 
-// [新增] 绘制商店
+// 商店绘制
 void draw_shop() {
     if (!ctx.show_shop) return;
     
@@ -546,55 +561,121 @@ void draw_shop() {
     attroff(COLOR_PAIR(15));
 }
 
+// [修改] 游戏主界面UI (包含比分板和装备栏)
 void draw_game_ui() {
-    int W = COLS; int bottom_y = LINES - UI_BOT_H;
+    int W = COLS; 
+    int bottom_y = LINES - UI_BOT_H;
     
-    // 顶部状态条
-    attron(COLOR_PAIR(10)); mvhline(0, 0, ' ', W); 
+    // --- 1. 顶栏背景与信息 ---
+    attron(COLOR_PAIR(10)); mvhline(0, 0, ' ', W); attroff(COLOR_PAIR(10));
+
+    // 时间与金币
     int m = ctx.game_time / 60; int s = ctx.game_time % 60;
-    
-    // [修改] 顶部显示金币
     attron(COLOR_PAIR(10) | A_BOLD); 
-    mvprintw(0, 2, "Time: %02d:%02d   User: %s   GOLD: %d", m, s, ctx.username.c_str(), ctx.my_gold); 
+    mvprintw(0, 2, "Time: %02d:%02d   Gold: %d", m, s, ctx.my_gold); 
     attroff(COLOR_PAIR(10) | A_BOLD);
     
-    mvprintw(0, W - 15, "[Q] QUIT"); attroff(COLOR_PAIR(10));
+    // 击杀比分板
+    char score_buf[64];
+    snprintf(score_buf, 64, "Blue %d  VS  %d Red", ctx.team1_score, ctx.team2_score);
+    int score_x = (W - strlen(score_buf)) / 2;
+    if(score_x < 0) score_x = 0;
+    attron(COLOR_PAIR(10) | A_BOLD);
+    mvprintw(0, score_x, "%s", score_buf);
+    attroff(COLOR_PAIR(10) | A_BOLD);
+
+    // 退出提示
+    attron(COLOR_PAIR(10));
+    mvprintw(0, W - 15, "[Q] QUIT"); 
+    attroff(COLOR_PAIR(10));
     
-    // 底部背景线
+    // --- 2. 底栏背景线 ---
     attron(COLOR_PAIR(11)); mvhline(bottom_y - 1, 0, ACS_HLINE, W); attroff(COLOR_PAIR(11));
     
-    // 英雄信息面板
     if (!ctx.has_hero_data) return;
     
-    attron(COLOR_PAIR(11) | A_BOLD); mvprintw(bottom_y, 2, "HERO INFO"); attroff(COLOR_PAIR(11) | A_BOLD);
+    // ===========================
+    // 左侧：装备栏 (占据约 32 列)
+    // ===========================
+    int equip_x = 2;
+    int equip_y = bottom_y;
+    
+    attron(COLOR_PAIR(11) | A_BOLD); 
+    mvprintw(equip_y, equip_x, "【装备】"); 
+    attroff(COLOR_PAIR(11) | A_BOLD);
+
+    attron(COLOR_PAIR(16)); 
+    for(int i=0; i<6; i++) {
+        int r = i / 2; // 行 (0, 1, 2)
+        int c = i % 2; // 列 (0, 1)
+        // 调整间距：列宽15字符
+        int item_x = equip_x + c * 15;
+        int item_y = equip_y + 1 + r;
+        
+        if (ctx.my_items[i] != 0) {
+            // 截断过长的名字以防溢出
+            char name_buf[16];
+            snprintf(name_buf, 15, "%s", get_item_name(ctx.my_items[i]));
+            mvprintw(item_y, item_x, "%d.%s", i+1, name_buf);
+        } else {
+            attron(A_DIM);
+            mvprintw(item_y, item_x, "[空]");
+            attroff(A_DIM);
+        }
+    }
+    attroff(COLOR_PAIR(16));
+
+    // ===========================
+    // 中间：状态与技能 (垂直布局)
+    // ===========================
+    // 计算居中位置，避开左侧装备(35)和右侧日志(W-35)
+    int center_w = W - 70; 
+    int cx = 35 + (center_w / 2) - 15; // 稍微左偏以容纳宽血条
+    if (cx < 36) cx = 36;
+
+    // Row 0: 英雄名字
+    attron(COLOR_PAIR(11) | A_BOLD); 
     const char* hname = "Unknown";
-    if(ctx.my_hero_status.input == HERO_WARRIOR) hname = "Warrior (武)";
-    if(ctx.my_hero_status.input == HERO_MAGE)    hname = "Mage    (法)";
-    if(ctx.my_hero_status.input == HERO_TANK)    hname = "Tank    (坦)";
-    mvprintw(bottom_y + 1, 2, "%s", hname); 
-    mvprintw(bottom_y + 2, 2, "Range: %d", ctx.my_hero_status.attack_range);
+    if(ctx.my_hero_status.input == HERO_WARRIOR) hname = "Warrior";
+    if(ctx.my_hero_status.input == HERO_MAGE)    hname = "Mage";
+    if(ctx.my_hero_status.input == HERO_TANK)    hname = "Tank";
+    mvprintw(bottom_y, cx, "%s (Lv.1)", hname); 
+    attroff(COLOR_PAIR(11) | A_BOLD);
     
-    // 绘制血条/蓝条 (居中)
-    int cx = W / 2 - 20;
-    draw_bar(bottom_y, cx, 20, ctx.my_hero_status.hp, ctx.my_hero_status.max_hp, 12, "HP:");
-    draw_bar(bottom_y + 1, cx, 20, 100, 100, 14, "MP:"); 
+    // Row 1 & 2: 血条与蓝条 (加宽到 25 以利用空间)
+    draw_bar(bottom_y + 1, cx, 25, ctx.my_hero_status.hp, ctx.my_hero_status.max_hp, 12, "HP:");
+    draw_bar(bottom_y + 2, cx, 25, 100, 100, 14, "MP:"); 
     
-    // 绘制技能框
-    int sy = bottom_y + 2;
-    draw_skill_box(sy, cx, 'J', "ATK", 15); draw_skill_box(sy, cx+8, 'K', "HEAL", 14);
-    draw_skill_box(sy, cx+16, 'U', "SK1", 14); draw_skill_box(sy, cx+24, 'I', "SK2", 14);
+    // Row 3-5: 技能栏 (放在血条下方，水平排列)
+    // 技能框高度为3，放在 bottom_y + 3 位置
+    int sk_y = bottom_y + 3; 
+    // 让技能框稍微向左对齐，使其在血条下方居中
+    int sk_start_x = cx - 2; 
     
-    // [新增] 商店提示
+    // 绘制 4 个技能 (J, K, U, I)
+    draw_skill_box(sk_y, sk_start_x,      'J', "ATK", 15); 
+    draw_skill_box(sk_y, sk_start_x + 8,  'K', "HEAL", 14);
+    // 如果你还需要 U 和 I 技能，可以取消注释下面两行
+    draw_skill_box(sk_y, sk_start_x + 16, 'U', "SK1", 14); 
+    draw_skill_box(sk_y, sk_start_x + 24, 'I', "SK2", 14);
+    
+    // 商店按钮 (放在技能右侧)
     attron(COLOR_PAIR(20) | A_BOLD);
-    mvprintw(bottom_y + 1, cx + 35, "[B] SHOP");
+    mvprintw(sk_y + 1, sk_start_x + 34, "[B] SHOP");
     attroff(COLOR_PAIR(20) | A_BOLD);
 
-    // 战斗日志 (右侧)
+    // ===========================
+    // 右侧：战斗日志
+    // ===========================
     int log_x = W - 35;
-    attron(COLOR_PAIR(11)); mvprintw(bottom_y, log_x, "COMBAT LOG"); attroff(COLOR_PAIR(11));
-    for(size_t i=0; i<ctx.logs.size(); i++) mvprintw(bottom_y + 1 + i, log_x, "> %s", ctx.logs[i].c_str());
+    if (log_x < equip_x + 40) log_x = equip_x + 40; // 防止重叠
 
-    // 最后绘制商店图层，保证覆盖在最上层
+    attron(COLOR_PAIR(11)); mvprintw(bottom_y, log_x, "COMBAT LOG"); attroff(COLOR_PAIR(11));
+    for(size_t i=0; i<ctx.logs.size(); i++) {
+        mvprintw(bottom_y + 1 + i, log_x, "> %s", ctx.logs[i].c_str());
+    }
+
+    // 绘制商店弹窗 (保持最上层)
     draw_shop();
 }
 
@@ -658,7 +739,12 @@ void process_network() {
             else if (type == TYPE_GAME_START) {
                 ctx.state = STATE_GAME; MapGenerator::init(ctx.game_map); 
                 GamePacket* gp = (GamePacket*)pdata; ctx.my_id = gp->id; update_camera(0,0); 
-                ctx.my_gold = 0; ctx.show_shop = false; // 重置金币和商店
+                // 重置游戏数据
+                ctx.my_gold = 0; 
+                ctx.show_shop = false;
+                memset(ctx.my_items, 0, sizeof(ctx.my_items));
+                ctx.team1_score = 0; 
+                ctx.team2_score = 0;
             }
             else if (type == TYPE_ROOM_LIST_RESP) {
                 ctx.state = STATE_LOBBY; RoomListPacket* l = (RoomListPacket*)pdata; 
@@ -694,9 +780,12 @@ void process_network() {
             }
             else if (type == TYPE_UPDATE) { 
                 ctx.pending_world_state.push_back(*pkt); 
-                // [新增] 同步金币
+                // [修改] 如果是自己，同步经济与战况
                 if (pkt->id == ctx.my_id) {
                     ctx.my_gold = pkt->gold;
+                    memcpy(ctx.my_items, pkt->items, sizeof(ctx.my_items));
+                    ctx.team1_score = pkt->team1_score;
+                    ctx.team2_score = pkt->team2_score;
                 }
             }
             else if (type == TYPE_EFFECT) { ctx.pending_effects_state.push_back(*pkt); }
@@ -800,12 +889,12 @@ void handle_inputs() {
         }
     }
     else if (ctx.state == STATE_GAME) {
-        // [新增] 商店开关
+        // 商店开关
         if (ch == 'b' || ch == 'B') {
             ctx.show_shop = !ctx.show_shop;
         }
         
-        // [新增] 商店购买逻辑
+        // 商店购买逻辑
         if (ctx.show_shop) {
             int buy_id = 0;
             if (ch == '1') buy_id = 1;
@@ -820,7 +909,6 @@ void handle_inputs() {
                 pkt.input = buy_id;
                 write(ctx.sock, &pkt, sizeof(pkt));
             }
-            // 如果在商店界面，可以选择是否屏蔽移动，这里选择不屏蔽，允许一边跑一边买
         }
 
         if (ch == 'w' || ch == 's' || ch == 'a' || ch == 'd') {

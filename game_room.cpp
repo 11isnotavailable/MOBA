@@ -20,7 +20,7 @@ static int dist_sq(int x1, int y1, int x2, int y2) {
     return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
 }
 
-// 英雄属性表 (与 server.cpp 保持一致)
+// 英雄属性表
 struct HeroData { int base_hp, range, dmg; };
 static std::map<int, HeroData> HERO_DB = {
     {HERO_WARRIOR, {HERO_HP_DEFAULT, 2, HERO_DMG_DEFAULT}},
@@ -45,6 +45,10 @@ GameRoom::GameRoom(int id, const std::string& owner_name) {
     this->wave_count = 0;
     this->last_spawn_minute = -1;
     
+    // [新增] 初始化比分
+    this->team1_kills = 0;
+    this->team2_kills = 0;
+
     this->global_id_counter = 1;
     this->tower_id_counter = TOWER_ID_START;
     this->minion_id_counter = MINION_ID_START;
@@ -130,13 +134,17 @@ void GameRoom::start_battle() {
     status = ROOM_STATUS_PLAYING; 
     game_start_time = get_current_ms();
     
+    // 重置比分
+    team1_kills = 0;
+    team2_kills = 0;
+
     init_map_and_units(); 
     
     for(auto& pair : players) {
         PlayerState& p = pair.second;
         p.is_playing = true;
         
-        // 初始化血量 (使用 get_total_max_hp 确保逻辑一致，虽此时 inventory 为空)
+        // 初始化血量 (使用 get_total_max_hp 确保逻辑一致)
         if (HERO_DB.count(p.hero_id)) {
             p.max_hp = HERO_DB[p.hero_id].base_hp;
         } else {
@@ -220,7 +228,7 @@ int GameRoom::get_player_id(int fd) {
 bool GameRoom::is_empty() { return players.empty(); }
 
 // =========================================
-// 属性计算与商店辅助函数 (NEW)
+// 属性计算与商店辅助函数
 // =========================================
 
 int GameRoom::get_total_atk(const PlayerState& p) {
@@ -268,6 +276,9 @@ void GameRoom::handle_buy_item(int fd, int item_id) {
     if (!players.count(fd)) return;
     PlayerState& p = players[fd];
     if (!p.is_playing) return;
+
+    // 检查库存上限 (最多6件)
+    if (p.inventory.size() >= 6) return;
 
     int cost = 0;
     if (item_id == ITEM_CLOTH_ARMOR || item_id == ITEM_IRON_SWORD) cost = PRICE_NORMAL;
@@ -574,7 +585,7 @@ void GameRoom::update_towers(long long now) {
             PlayerState* p = get_player_by_id(t.target_id);
             if (p) {
                 int base_dmg = TOWER_BASE_DMG_HERO * (int)pow(2, t.consecutive_hits);
-                // [修改] 塔打人也计算防御
+                // 塔打人也计算防御
                 int def = get_total_def(*p);
                 int final_dmg = base_dmg - def;
                 if (final_dmg < 1) final_dmg = 1;
@@ -584,6 +595,10 @@ void GameRoom::update_towers(long long now) {
                 p->current_effect = EFFECT_HIT;
                 
                 if(p->hp <= 0) { 
+                    // [新增] 塔击杀也算分
+                    if (p->color == 1) team2_kills++; 
+                    else team1_kills++;
+
                     p->hp = p->max_hp; 
                     p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
                     t.target_id = 0; t.consecutive_hits = 0;
@@ -671,12 +686,20 @@ void GameRoom::update_minions(long long now) {
                             m.last_attack_time = now;
                             m.visual_end_time = now + 200; 
                             
-                            // [修改] 小兵打人计算防御
+                            // 小兵打人计算防御
                             if (p) {
                                 int def = get_total_def(*p);
                                 int dmg = m.dmg - def;
                                 if (dmg < 1) dmg = 1;
                                 p->hp -= dmg;
+
+                                if(p->hp <= 0) {
+                                    if (p->color == 1) team2_kills++; 
+                                    else team1_kills++;
+                                    
+                                    p->hp = p->max_hp;
+                                    p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
+                                }
                             }
                             else if (minions.count(m.target_id)) minions[m.target_id].hp -= m.dmg;
                             else if (towers.count(m.target_id)) towers[m.target_id].hp -= m.dmg; 
@@ -746,6 +769,9 @@ void GameRoom::update_jungle(long long now) {
                                     p.second.hp -= dmg;
                                     p.second.current_effect = EFFECT_HIT;
                                     if(p.second.hp <= 0) { 
+                                        if (p.second.color == 1) team2_kills++; 
+                                        else team1_kills++;
+
                                         p.second.hp = p.second.max_hp; 
                                         p.second.x = (p.second.color == 1)?22:128; p.second.y = (p.second.color == 1)?128:22;
                                         m.target_id = 0; m.attack_counter = 0; m.boss_state = 0;
@@ -785,6 +811,9 @@ void GameRoom::update_jungle(long long now) {
                                     if (!is_blocked_by_tower(nx, ny)) { p.second.x = nx; p.second.y = ny; }
                                     
                                     if(p.second.hp <= 0) {
+                                        if (p.second.color == 1) team2_kills++; 
+                                        else team1_kills++;
+
                                         p.second.hp = p.second.max_hp; 
                                         p.second.x = (p.second.color == 1)?22:128; p.second.y = (p.second.color == 1)?128:22;
                                         m.target_id = 0; m.attack_counter = 0; m.boss_state = 0;
@@ -838,6 +867,15 @@ void GameRoom::update_jungle(long long now) {
                             if(dmg < 1) dmg = 1;
                             p->hp -= dmg; 
                             p->current_effect = EFFECT_HIT; 
+
+                            if(p->hp <= 0) {
+                                if (p->color == 1) team2_kills++; 
+                                else team1_kills++;
+
+                                p->hp = p->max_hp;
+                                p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
+                                m.target_id = 0; m.attack_counter = 0; m.boss_state = 0;
+                            }
                         }
                     }
                 }
@@ -849,7 +887,7 @@ void GameRoom::update_jungle(long long now) {
     for(int id : dead_ids) jungle_mobs.erase(id);
 }
 
-// [修改] 核心攻击逻辑：应用属性计算、防御力、吸血与金币
+// [修改] 核心攻击逻辑：应用属性计算、防御力、吸血与金币、比分
 bool GameRoom::handle_attack_logic(int attacker_fd) {
     PlayerState& att = players[attacker_fd];
     HeroData& tmpl = HERO_DB[att.hero_id];
@@ -904,6 +942,10 @@ bool GameRoom::handle_attack_logic(int attacker_fd) {
             p->hp -= final_dmg;
             p->current_effect = EFFECT_HIT;
              if(p->hp <= 0) {
+                // [新增] 击杀比分更新
+                if (p->color == 1) team2_kills++;
+                else team1_kills++;
+
                 add_gold(att.id, 300); // 击杀英雄金币
                 p->hp = p->max_hp; 
                 p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
@@ -939,12 +981,33 @@ bool GameRoom::handle_attack_logic(int attacker_fd) {
 void GameRoom::broadcast_world(long long now) {
     std::vector<GamePacket> updates;
     
-    // Pack Players (新增 gold)
+    // Pack Players
     for(auto& pair : players) {
         if(!pair.second.is_playing) continue;
         PlayerState& p = pair.second;
         int atk_target = (now < p.visual_end_time) ? p.current_target_id : 0;
-        GamePacket pkt = { TYPE_UPDATE, p.id, p.x, p.y, p.hero_id, 0, p.color, p.hp, p.max_hp, HERO_DB[p.hero_id].range, p.current_effect, atk_target, p.gold };
+        
+        GamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = TYPE_UPDATE;
+        pkt.id = p.id;
+        pkt.x = p.x; pkt.y = p.y;
+        pkt.input = p.hero_id;
+        pkt.color = p.color;
+        pkt.hp = p.hp; pkt.max_hp = p.max_hp;
+        pkt.attack_range = HERO_DB[p.hero_id].range;
+        pkt.effect = p.current_effect;
+        pkt.attack_target_id = atk_target;
+        pkt.gold = p.gold;
+        
+        // [新增] 填充装备栏
+        for(size_t i=0; i<p.inventory.size() && i<6; i++) {
+            pkt.items[i] = p.inventory[i];
+        }
+        // [新增] 填充队伍比分
+        pkt.team1_score = team1_kills;
+        pkt.team2_score = team2_kills;
+
         updates.push_back(pkt);
         p.current_effect = EFFECT_NONE;
     }
@@ -953,14 +1016,26 @@ void GameRoom::broadcast_world(long long now) {
         if(pair.second.hp <= 0) continue;
         TowerObj& t = pair.second;
         int atk_target = (now < t.visual_end_time) ? t.target_id : 0;
-        GamePacket pkt = { TYPE_UPDATE, t.id, t.x, t.y, 0, 0, t.team, t.hp, t.max_hp, 0, 0, atk_target, 0 };
+        
+        GamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = TYPE_UPDATE;
+        pkt.id = t.id; pkt.x = t.x; pkt.y = t.y;
+        pkt.color = t.team; pkt.hp = t.hp; pkt.max_hp = t.max_hp;
+        pkt.attack_target_id = atk_target;
         updates.push_back(pkt);
     }
     // Pack Minions
     for(auto& pair : minions) {
         MinionObj& m = pair.second;
         int atk_target = (now < m.visual_end_time) ? m.target_id : 0;
-        GamePacket pkt = { TYPE_UPDATE, m.id, (int)m.x, (int)m.y, m.type, 0, m.team, m.hp, m.max_hp, 0, 0, atk_target, 0 };
+
+        GamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = TYPE_UPDATE;
+        pkt.id = m.id; pkt.x = (int)m.x; pkt.y = (int)m.y;
+        pkt.input = m.type; pkt.color = m.team; pkt.hp = m.hp; pkt.max_hp = m.max_hp;
+        pkt.attack_target_id = atk_target;
         updates.push_back(pkt);
     }
     // Pack Jungle
@@ -968,9 +1043,18 @@ void GameRoom::broadcast_world(long long now) {
         JungleObj& m = pair.second;
         if(m.hp <= 0) continue;
         int atk_target = (now < m.visual_end_time) ? m.target_id : 0;
-        GamePacket pkt = { TYPE_UPDATE, m.id, m.x, m.y, m.type, 0, 0, m.hp, m.max_hp, 0, 0, atk_target, 0 };
+        
+        GamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = TYPE_UPDATE;
+        pkt.id = m.id; pkt.x = m.x; pkt.y = m.y;
+        pkt.input = m.type; pkt.hp = m.hp; pkt.max_hp = m.max_hp;
+        pkt.attack_target_id = atk_target;
+        
         if (m.type == BOSS_TYPE_TYRANT && m.boss_state == 2) { 
-             GamePacket eff = { TYPE_EFFECT, 0, m.x, m.y, VFX_TYRANT_WAVE, 0, 0, 0, 0, TYRANT_RANGE, 0, 0 };
+             GamePacket eff; memset(&eff, 0, sizeof(eff));
+             eff.type = TYPE_EFFECT; eff.x = m.x; eff.y = m.y;
+             eff.input = VFX_TYRANT_WAVE; eff.attack_range = TYRANT_RANGE;
              updates.push_back(eff);
         }
         updates.push_back(pkt);
@@ -978,7 +1062,9 @@ void GameRoom::broadcast_world(long long now) {
     // Pack Effects
     for(auto& ef : active_effects) {
         if(now < ef.end_time) {
-            GamePacket pkt = { TYPE_EFFECT, 0, ef.x, ef.y, ef.type, 0, 0, 0, 0, ef.radius, 0, 0 };
+            GamePacket pkt; memset(&pkt, 0, sizeof(pkt));
+            pkt.type = TYPE_EFFECT; pkt.x = ef.x; pkt.y = ef.y;
+            pkt.input = ef.type; pkt.attack_range = ef.radius;
             updates.push_back(pkt);
         }
     }

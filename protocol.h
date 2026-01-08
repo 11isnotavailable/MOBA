@@ -46,11 +46,11 @@
 #define BOSS_TYPE_OVERLORD    4  
 #define BOSS_TYPE_TYRANT      5  
 
-// === [新增] 商店与物品定义 ===
+// === [商店] 物品定义 ===
 #define ITEM_CLOTH_ARMOR    1  // 布甲 (Def+50, HP+500)
 #define ITEM_IRON_SWORD     2  // 铁剑 (Atk+100)
 #define ITEM_LIFESTEAL      3  // 泣血之刃 (Atk+300, 吸血)
-#define ITEM_REGEN_ARMOR    4  // 霸者之装 (HP+2000, Def+200, 回血)
+#define ITEM_REGEN_ARMOR    4  // 霸者重装 (HP+2000, Def+200, 回血)
 #define ITEM_ARMY_BREAKER   5  // 破军 (Atk+500)
 
 #define PRICE_NORMAL        500
@@ -85,7 +85,7 @@
 #define TYPE_ATTACK         5  
 #define TYPE_SPELL          6  
 #define TYPE_EFFECT         7  
-#define TYPE_BUY_ITEM       30 // [新增] 购买物品
+#define TYPE_BUY_ITEM       30 // 购买物品
 
 // --- 返回码 ---
 #define RET_SUCCESS      0
@@ -171,7 +171,12 @@ struct GamePacket {
     int attack_range;
     int effect;            
     int attack_target_id;  
-    int gold;       // [新增] 用于同步客户端金币显示
+    int gold;       
+    
+    // [新增] 用于同步客户端展示
+    int items[6];     // 装备栏同步
+    int team1_score;  // 蓝方(Team1)击杀数
+    int team2_score;  // 红方(Team2)击杀数
 };
 
 // ==========================================
@@ -213,7 +218,7 @@ struct GamePacket {
 #define TOWER_BASE_DMG_MINION 300     
 #define TOWER_BASE_DMG_HERO   300     
 
-// 小兵速度调整: 每秒走 2 格 -> 0.01 格/帧 (200FPS)
+// 小兵速度调整
 #define MINION_MOVE_SPEED     0.01f    
 
 #define MINION_ATK_COOLDOWN   2000    

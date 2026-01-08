@@ -12,7 +12,7 @@
 // --------------------------------------------------------
 struct PlayerState {
     int fd;
-    int id; // 运行时实体ID (Entity ID)
+    int id; // 运行时实体ID
     int x, y;
     int hp, max_hp;
     int hero_id;
@@ -28,7 +28,7 @@ struct PlayerState {
     bool is_ready;
     std::string name;
 
-    // [新增] 战斗属性与经济系统
+    // 战斗属性与经济系统
     int gold;
     int base_def;                       // 基础防御力
     std::vector<int> inventory;         // 物品ID列表
@@ -123,6 +123,10 @@ private:
     int wave_count;
     int last_spawn_minute;
     
+    // [新增] 队伍击杀比分
+    int team1_kills;
+    int team2_kills;
+
     // ID 计数器
     int global_id_counter; 
     int tower_id_counter;
@@ -148,7 +152,7 @@ private:
 
     void start_battle(); 
 
-    // [新增] 商店与属性计算逻辑
+    // 商店与属性计算逻辑
     void handle_buy_item(int fd, int item_id);
     int get_total_atk(const PlayerState& p);
     int get_total_def(const PlayerState& p);
