@@ -86,6 +86,7 @@
 #define TYPE_SPELL          6  
 #define TYPE_EFFECT         7  
 #define TYPE_BUY_ITEM       30 // 购买物品
+#define TYPE_GAME_OVER      40 // [新增] 游戏结束结算
 
 // --- 返回码 ---
 #define RET_SUCCESS      0
@@ -173,10 +174,27 @@ struct GamePacket {
     int attack_target_id;  
     int gold;       
     
-    // [新增] 用于同步客户端展示
+    // 用于同步客户端展示
     int items[6];     // 装备栏同步
     int team1_score;  // 蓝方(Team1)击杀数
     int team2_score;  // 红方(Team2)击杀数
+};
+
+// [新增] 6. 游戏结算包
+struct PlayerResult {
+    char name[32];
+    int team;     // 1 or 2
+    int hero_id;
+    int kills;    // 击杀
+    int deaths;   // 死亡
+};
+
+struct GameOverPacket {
+    int type;           // TYPE_GAME_OVER
+    int winner_team;    // 1: Blue Win, 2: Red Win
+    int duration_sec;   // 游戏时长
+    int player_count;
+    PlayerResult results[10];
 };
 
 // ==========================================

@@ -45,7 +45,7 @@ GameRoom::GameRoom(int id, const std::string& owner_name) {
     this->wave_count = 0;
     this->last_spawn_minute = -1;
     
-    // [新增] 初始化比分
+    // 初始化比分
     this->team1_kills = 0;
     this->team2_kills = 0;
 
@@ -129,7 +129,7 @@ bool GameRoom::start_game(int fd_requester) {
     return true;
 }
 
-// [修改] 真正开始战斗的初始化
+// 真正开始战斗的初始化
 void GameRoom::start_battle() {
     status = ROOM_STATUS_PLAYING; 
     game_start_time = get_current_ms();
@@ -144,19 +144,23 @@ void GameRoom::start_battle() {
         PlayerState& p = pair.second;
         p.is_playing = true;
         
-        // 初始化血量 (使用 get_total_max_hp 确保逻辑一致)
+        // 初始化血量
         if (HERO_DB.count(p.hero_id)) {
             p.max_hp = HERO_DB[p.hero_id].base_hp;
         } else {
             p.max_hp = HERO_HP_DEFAULT;
         }
         
-        // [新增] 初始化经济与物品
+        // 初始化经济与物品
         p.gold = 0;
         p.inventory.clear();
         p.last_regen_passive_time = 0;
+        
+        // 初始化个人战绩
+        p.kills = 0;
+        p.deaths = 0;
 
-        // [新增] 初始化防御力
+        // 初始化防御力
         if (p.hero_id == HERO_TANK) p.base_def = 120;
         else if (p.hero_id == HERO_WARRIOR) p.base_def = 80;
         else if (p.hero_id == HERO_MAGE) p.base_def = 50;
@@ -352,7 +356,6 @@ void GameRoom::handle_game_packet(int fd, const GamePacket& pkt) {
             p.hp += 100; 
             if(p.hp > p.max_hp) p.hp = p.max_hp;
         }
-        // [新增] 商店购买
         else if (pkt.type == TYPE_BUY_ITEM) {
             handle_buy_item(fd, pkt.input);
         }
@@ -364,7 +367,7 @@ void GameRoom::update_logic() {
     
     long long now = get_current_ms();
     
-    // [新增] 物品被动逻辑 (霸者之装回血)
+    // 物品被动逻辑 (霸者之装回血)
     for (auto& pair : players) {
         PlayerState& p = pair.second;
         if (!p.is_playing) continue;
@@ -389,6 +392,54 @@ void GameRoom::update_logic() {
     update_minions(now);
     update_jungle(now);
     broadcast_world(now);
+
+    // [新增] 检查基地是否被推（游戏结束判定）
+    bool team1_base_alive = false;
+    bool team2_base_alive = false;
+
+    // 遍历所有塔，检查基地存活情况 (HP > 0)
+    for(auto& pair : towers) {
+        // [关键修复]：不要使用 max_hp == 10000 判断，因为普通塔也是 10000
+        // 必须使用 game_map 的地块类型判断是否为 TILE_BASE
+        if (game_map[pair.second.y][pair.second.x] == TILE_BASE && pair.second.hp > 0) {
+            if (pair.second.team == 1) team1_base_alive = true;
+            if (pair.second.team == 2) team2_base_alive = true;
+        }
+    }
+
+    int winner = 0;
+    if (!team1_base_alive) winner = 2; // 蓝方基地爆了，红方胜
+    else if (!team2_base_alive) winner = 1; // 红方基地爆了，蓝方胜
+
+    if (winner != 0) {
+        // 构造结算包
+        GameOverPacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = TYPE_GAME_OVER;
+        pkt.winner_team = winner;
+        pkt.duration_sec = current_sec;
+        pkt.player_count = 0;
+
+        for(auto& pair : players) {
+            if (pkt.player_count < 10) {
+                PlayerResult& res = pkt.results[pkt.player_count++];
+                strncpy(res.name, pair.second.name.c_str(), 31);
+                res.team = pair.second.color;
+                res.hero_id = pair.second.hero_id;
+                res.kills = pair.second.kills;
+                res.deaths = pair.second.deaths;
+            }
+        }
+
+        // 广播给所有人
+        for(auto& pair : players) {
+            write(pair.first, &pkt, sizeof(pkt));
+        }
+
+        // 结束游戏状态，重置为等待
+        status = ROOM_STATUS_WAITING; 
+        std::cout << "[Room " << room_id << "] GAME OVER. Winner: Team " << winner << std::endl;
+    }
 }
 
 // =========================================
@@ -595,9 +646,12 @@ void GameRoom::update_towers(long long now) {
                 p->current_effect = EFFECT_HIT;
                 
                 if(p->hp <= 0) { 
-                    // [新增] 塔击杀也算分
+                    // 塔击杀也算分
                     if (p->color == 1) team2_kills++; 
                     else team1_kills++;
+
+                    // 记录死亡
+                    p->deaths++;
 
                     p->hp = p->max_hp; 
                     p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
@@ -696,6 +750,9 @@ void GameRoom::update_minions(long long now) {
                                 if(p->hp <= 0) {
                                     if (p->color == 1) team2_kills++; 
                                     else team1_kills++;
+
+                                    // 记录死亡
+                                    p->deaths++;
                                     
                                     p->hp = p->max_hp;
                                     p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
@@ -772,6 +829,9 @@ void GameRoom::update_jungle(long long now) {
                                         if (p.second.color == 1) team2_kills++; 
                                         else team1_kills++;
 
+                                        // 记录死亡
+                                        p.second.deaths++;
+
                                         p.second.hp = p.second.max_hp; 
                                         p.second.x = (p.second.color == 1)?22:128; p.second.y = (p.second.color == 1)?128:22;
                                         m.target_id = 0; m.attack_counter = 0; m.boss_state = 0;
@@ -813,6 +873,9 @@ void GameRoom::update_jungle(long long now) {
                                     if(p.second.hp <= 0) {
                                         if (p.second.color == 1) team2_kills++; 
                                         else team1_kills++;
+
+                                        // 记录死亡
+                                        p.second.deaths++;
 
                                         p.second.hp = p.second.max_hp; 
                                         p.second.x = (p.second.color == 1)?22:128; p.second.y = (p.second.color == 1)?128:22;
@@ -872,6 +935,9 @@ void GameRoom::update_jungle(long long now) {
                                 if (p->color == 1) team2_kills++; 
                                 else team1_kills++;
 
+                                // 记录死亡
+                                p->deaths++;
+
                                 p->hp = p->max_hp;
                                 p->x = (p->color == 1) ? 22 : 128; p->y = (p->color == 1) ? 128 : 22;
                                 m.target_id = 0; m.attack_counter = 0; m.boss_state = 0;
@@ -887,7 +953,7 @@ void GameRoom::update_jungle(long long now) {
     for(int id : dead_ids) jungle_mobs.erase(id);
 }
 
-// [修改] 核心攻击逻辑：应用属性计算、防御力、吸血与金币、比分
+// 核心攻击逻辑：应用属性计算、防御力、吸血与金币、比分
 bool GameRoom::handle_attack_logic(int attacker_fd) {
     PlayerState& att = players[attacker_fd];
     HeroData& tmpl = HERO_DB[att.hero_id];
@@ -942,7 +1008,11 @@ bool GameRoom::handle_attack_logic(int attacker_fd) {
             p->hp -= final_dmg;
             p->current_effect = EFFECT_HIT;
              if(p->hp <= 0) {
-                // [新增] 击杀比分更新
+                // 记录死亡与击杀
+                p->deaths++;
+                att.kills++;
+
+                // 击杀比分更新
                 if (p->color == 1) team2_kills++;
                 else team1_kills++;
 
@@ -1000,11 +1070,11 @@ void GameRoom::broadcast_world(long long now) {
         pkt.attack_target_id = atk_target;
         pkt.gold = p.gold;
         
-        // [新增] 填充装备栏
+        // 填充装备栏
         for(size_t i=0; i<p.inventory.size() && i<6; i++) {
             pkt.items[i] = p.inventory[i];
         }
-        // [新增] 填充队伍比分
+        // 填充队伍比分
         pkt.team1_score = team1_kills;
         pkt.team2_score = team2_kills;
 

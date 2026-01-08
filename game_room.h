@@ -33,6 +33,10 @@ struct PlayerState {
     int base_def;                       // 基础防御力
     std::vector<int> inventory;         // 物品ID列表
     long long last_regen_passive_time;  // 霸者之装回血计时器
+
+    // [新增] 个人战绩
+    int kills;
+    int deaths;
 };
 
 struct TowerObj {
@@ -123,7 +127,7 @@ private:
     int wave_count;
     int last_spawn_minute;
     
-    // [新增] 队伍击杀比分
+    // 队伍击杀比分
     int team1_kills;
     int team2_kills;
 

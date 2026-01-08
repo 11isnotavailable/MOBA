@@ -24,7 +24,9 @@ enum AppState {
     STATE_LOBBY,
     STATE_ROOM,
     STATE_PICK, // 选人阶段
-    STATE_GAME
+    STATE_GAME,
+    STATE_GAME_OVER_ANIM, // [新增] 游戏结束动画
+    STATE_SETTLEMENT      // [新增] 结算页面
 };
 
 struct AppContext {
@@ -57,7 +59,7 @@ struct AppContext {
     GamePacket my_hero_status;
     bool has_hero_data;
     
-    // [新增] 经济与战况数据
+    // 经济与战况数据
     int my_gold;
     bool show_shop;
     int my_items[6];   // 装备栏
@@ -76,6 +78,10 @@ struct AppContext {
     int last_pos_x, last_pos_y;
     int stuck_frames;
     long long last_auto_move_time;
+
+    // [新增] 结算相关
+    GameOverPacket game_result;
+    long long game_over_time;
 };
 
 // 全局上下文实例
@@ -116,7 +122,7 @@ void update_camera(int hx, int hy) {
     if (ctx.cam_y > MAP_SIZE - ctx.view_h) ctx.cam_y = MAP_SIZE - ctx.view_h;
 }
 
-// [新增] 获取装备中文名
+// 获取装备中文名
 const char* get_item_name(int id) {
     switch(id) {
         case ITEM_CLOTH_ARMOR: return "布甲";
@@ -561,7 +567,7 @@ void draw_shop() {
     attroff(COLOR_PAIR(15));
 }
 
-// [修改] 游戏主界面UI (包含比分板和装备栏)
+// 游戏主界面UI (包含比分板和装备栏)
 void draw_game_ui() {
     int W = COLS; 
     int bottom_y = LINES - UI_BOT_H;
@@ -608,12 +614,10 @@ void draw_game_ui() {
     for(int i=0; i<6; i++) {
         int r = i / 2; // 行 (0, 1, 2)
         int c = i % 2; // 列 (0, 1)
-        // 调整间距：列宽15字符
         int item_x = equip_x + c * 15;
         int item_y = equip_y + 1 + r;
         
         if (ctx.my_items[i] != 0) {
-            // 截断过长的名字以防溢出
             char name_buf[16];
             snprintf(name_buf, 15, "%s", get_item_name(ctx.my_items[i]));
             mvprintw(item_y, item_x, "%d.%s", i+1, name_buf);
@@ -628,9 +632,8 @@ void draw_game_ui() {
     // ===========================
     // 中间：状态与技能 (垂直布局)
     // ===========================
-    // 计算居中位置，避开左侧装备(35)和右侧日志(W-35)
     int center_w = W - 70; 
-    int cx = 35 + (center_w / 2) - 15; // 稍微左偏以容纳宽血条
+    int cx = 35 + (center_w / 2) - 15; 
     if (cx < 36) cx = 36;
 
     // Row 0: 英雄名字
@@ -642,24 +645,20 @@ void draw_game_ui() {
     mvprintw(bottom_y, cx, "%s (Lv.1)", hname); 
     attroff(COLOR_PAIR(11) | A_BOLD);
     
-    // Row 1 & 2: 血条与蓝条 (加宽到 25 以利用空间)
+    // Row 1 & 2: 血条与蓝条
     draw_bar(bottom_y + 1, cx, 25, ctx.my_hero_status.hp, ctx.my_hero_status.max_hp, 12, "HP:");
     draw_bar(bottom_y + 2, cx, 25, 100, 100, 14, "MP:"); 
     
-    // Row 3-5: 技能栏 (放在血条下方，水平排列)
-    // 技能框高度为3，放在 bottom_y + 3 位置
+    // Row 3-5: 技能栏
     int sk_y = bottom_y + 3; 
-    // 让技能框稍微向左对齐，使其在血条下方居中
     int sk_start_x = cx - 2; 
     
-    // 绘制 4 个技能 (J, K, U, I)
     draw_skill_box(sk_y, sk_start_x,      'J', "ATK", 15); 
     draw_skill_box(sk_y, sk_start_x + 8,  'K', "HEAL", 14);
-    // 如果你还需要 U 和 I 技能，可以取消注释下面两行
     draw_skill_box(sk_y, sk_start_x + 16, 'U', "SK1", 14); 
     draw_skill_box(sk_y, sk_start_x + 24, 'I', "SK2", 14);
     
-    // 商店按钮 (放在技能右侧)
+    // 商店按钮
     attron(COLOR_PAIR(20) | A_BOLD);
     mvprintw(sk_y + 1, sk_start_x + 34, "[B] SHOP");
     attroff(COLOR_PAIR(20) | A_BOLD);
@@ -668,15 +667,100 @@ void draw_game_ui() {
     // 右侧：战斗日志
     // ===========================
     int log_x = W - 35;
-    if (log_x < equip_x + 40) log_x = equip_x + 40; // 防止重叠
+    if (log_x < equip_x + 40) log_x = equip_x + 40; 
 
     attron(COLOR_PAIR(11)); mvprintw(bottom_y, log_x, "COMBAT LOG"); attroff(COLOR_PAIR(11));
     for(size_t i=0; i<ctx.logs.size(); i++) {
         mvprintw(bottom_y + 1 + i, log_x, "> %s", ctx.logs[i].c_str());
     }
 
-    // 绘制商店弹窗 (保持最上层)
     draw_shop();
+}
+
+// [新增] 绘制结算页面
+void draw_settlement() {
+    erase();
+    int cx = COLS / 2;
+    int W = COLS;
+    int H = LINES;
+
+    // --- 顶栏 ---
+    attron(A_BOLD);
+    bool i_win = false;
+    // 找到自己所在的队伍判断输赢
+    int my_team = 0;
+    for(int i=0; i<ctx.game_result.player_count; i++) {
+        if(strcmp(ctx.game_result.results[i].name, ctx.username.c_str()) == 0) {
+            my_team = ctx.game_result.results[i].team;
+            break;
+        }
+    }
+    if (my_team == ctx.game_result.winner_team) i_win = true;
+
+    if (i_win) {
+        attron(COLOR_PAIR(20)); // 黄红配色
+        mvprintw(2, cx - 10, "================ VICTORY ================");
+        attroff(COLOR_PAIR(20));
+    } else {
+        attron(COLOR_PAIR(2)); // 红色
+        mvprintw(2, cx - 10, "================ DEFEAT =================");
+        attroff(COLOR_PAIR(2));
+    }
+
+    int m = ctx.game_result.duration_sec / 60;
+    int s = ctx.game_result.duration_sec % 60;
+    mvprintw(2, W - 20, "Duration: %02d:%02d", m, s);
+    attroff(A_BOLD);
+
+    mvhline(4, 0, ACS_HLINE, W);
+
+    // --- 中栏 (左右分栏) ---
+    // 左侧：蓝队 (Team 1)
+    attron(COLOR_PAIR(4) | A_BOLD);
+    mvprintw(6, cx - 20, "--- BLUE TEAM ---");
+    attroff(COLOR_PAIR(4) | A_BOLD);
+    
+    mvprintw(8, 5, "%-15s %-5s %-5s %-5s", "Name", "Hero", "K", "D");
+    
+    int blue_y = 10;
+    int red_y = 10;
+    
+    for(int i=0; i<ctx.game_result.player_count; i++) {
+        PlayerResult& r = ctx.game_result.results[i];
+        const char* hname = (r.hero_id==1?"War":(r.hero_id==2?"Mag":"Tnk"));
+        
+        if (r.team == 1) {
+            if (strcmp(r.name, ctx.username.c_str()) == 0) attron(A_REVERSE);
+            mvprintw(blue_y, 5, "%-15s %-5s %-2d    %-2d", r.name, hname, r.kills, r.deaths);
+            if (strcmp(r.name, ctx.username.c_str()) == 0) attroff(A_REVERSE);
+            blue_y += 2;
+        }
+    }
+
+    // 右侧：红队 (Team 2)
+    attron(COLOR_PAIR(2) | A_BOLD);
+    mvprintw(6, cx + 10, "--- RED TEAM ---");
+    attroff(COLOR_PAIR(2) | A_BOLD);
+    
+    mvprintw(8, cx + 5, "%-15s %-5s %-5s %-5s", "Name", "Hero", "K", "D");
+
+    for(int i=0; i<ctx.game_result.player_count; i++) {
+        PlayerResult& r = ctx.game_result.results[i];
+        const char* hname = (r.hero_id==1?"War":(r.hero_id==2?"Mag":"Tnk"));
+        
+        if (r.team == 2) {
+            if (strcmp(r.name, ctx.username.c_str()) == 0) attron(A_REVERSE);
+            mvprintw(red_y, cx + 5, "%-15s %-5s %-2d    %-2d", r.name, hname, r.kills, r.deaths);
+            if (strcmp(r.name, ctx.username.c_str()) == 0) attroff(A_REVERSE);
+            red_y += 2;
+        }
+    }
+
+    // --- 底栏 ---
+    mvhline(H - 4, 0, ACS_HLINE, W);
+    attron(A_BLINK | A_BOLD);
+    mvprintw(H - 2, cx - 15, "Press [ENTER] to Return Lobby");
+    attroff(A_BLINK | A_BOLD);
 }
 
 // ==========================================
@@ -699,6 +783,7 @@ void process_network() {
         else if (type == TYPE_ROOM_LIST_RESP) pkt_len = sizeof(RoomListPacket);
         else if (type == TYPE_ROOM_UPDATE) pkt_len = sizeof(RoomStatePacket);
         else if (type == TYPE_GAME_START || type == TYPE_FRAME || type == TYPE_UPDATE || type == TYPE_EFFECT) pkt_len = sizeof(GamePacket);
+        else if (type == TYPE_GAME_OVER) pkt_len = sizeof(GameOverPacket); // [新增]
         else if (type >= 10 && type <= 30) pkt_len = sizeof(int); 
         
         if (pkt_len == 0) { ptr = buf_len; break; } 
@@ -780,7 +865,6 @@ void process_network() {
             }
             else if (type == TYPE_UPDATE) { 
                 ctx.pending_world_state.push_back(*pkt); 
-                // [修改] 如果是自己，同步经济与战况
                 if (pkt->id == ctx.my_id) {
                     ctx.my_gold = pkt->gold;
                     memcpy(ctx.my_items, pkt->items, sizeof(ctx.my_items));
@@ -789,6 +873,15 @@ void process_network() {
                 }
             }
             else if (type == TYPE_EFFECT) { ctx.pending_effects_state.push_back(*pkt); }
+            else if (type == TYPE_GAME_OVER) { // [新增] 游戏结束处理
+                GameOverPacket* gp = (GameOverPacket*)pdata;
+                ctx.game_result = *gp;
+                ctx.state = STATE_GAME_OVER_ANIM;
+                ctx.game_over_time = get_ms();
+                // 清理战斗数据
+                ctx.world_state.clear();
+                ctx.effects_state.clear();
+            }
         }
         ptr += pkt_len;
     }
@@ -927,6 +1020,14 @@ void handle_inputs() {
             }
         }
     }
+    else if (ctx.state == STATE_SETTLEMENT) {
+        if (ch == '\n') {
+            // [新增] 结算页面回车回大厅
+            int t = TYPE_ROOM_LIST_REQ;
+            write(ctx.sock, &t, sizeof(t));
+            ctx.state = STATE_LOBBY;
+        }
+    }
 }
 
 // ==========================================
@@ -983,6 +1084,41 @@ int main() {
         else if (ctx.state == STATE_ROOM) draw_room();
         else if (ctx.state == STATE_PICK) draw_pick_screen(); 
         else if (ctx.state == STATE_GAME) { draw_game_scene(); draw_game_ui(); }
+        // [新增] 胜负动画与结算
+        else if (ctx.state == STATE_GAME_OVER_ANIM) {
+            long long now = get_ms();
+            long long diff = now - ctx.game_over_time;
+            
+            if (diff < 1000) {
+                // 停滞 1秒 (黑屏)
+                erase();
+                mvprintw(LINES/2, COLS/2 - 5, "GAME OVER...");
+            } 
+            else if (diff < 3000) { // 1000 + 2000 ms
+                // 显示 Victory / Defeat
+                erase();
+                bool i_win = false;
+                int my_team = 0;
+                for(int i=0; i<ctx.game_result.player_count; i++) if(strcmp(ctx.game_result.results[i].name, ctx.username.c_str())==0) my_team=ctx.game_result.results[i].team;
+                if(my_team == ctx.game_result.winner_team) i_win = true;
+
+                if (i_win) {
+                    attron(COLOR_PAIR(20) | A_BOLD | A_BLINK);
+                    mvprintw(LINES/2, COLS/2 - 4, "VICTORY!");
+                    attroff(COLOR_PAIR(20) | A_BOLD | A_BLINK);
+                } else {
+                    attron(COLOR_PAIR(2) | A_BOLD);
+                    mvprintw(LINES/2, COLS/2 - 4, "DEFEAT...");
+                    attroff(COLOR_PAIR(2) | A_BOLD);
+                }
+            } 
+            else {
+                ctx.state = STATE_SETTLEMENT;
+            }
+        }
+        else if (ctx.state == STATE_SETTLEMENT) {
+            draw_settlement();
+        }
 
         refresh();
         usleep(10000); 
